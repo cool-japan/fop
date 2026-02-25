@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-width="210mm" page-height="297mm">
+      <fo:region-body margin="1in"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="18pt" font-weight="bold" text-align="center">
+        INVOICE
+      </fo:block>
+
+      <fo:block space-before="12pt">
+        Invoice #: 12345
+      </fo:block>
+      <fo:block>Date: January 1, 2024</fo:block>
+
+      <fo:table space-before="24pt" border="1pt solid black">
+        <fo:table-column column-width="60%"/>
+        <fo:table-column column-width="20%"/>
+        <fo:table-column column-width="20%"/>
+
+        <fo:table-header>
+          <fo:table-row background-color="#CCCCCC">
+            <fo:table-cell padding="4pt"><fo:block>Item</fo:block></fo:table-cell>
+            <fo:table-cell padding="4pt"><fo:block>Qty</fo:block></fo:table-cell>
+            <fo:table-cell padding="4pt"><fo:block>Price</fo:block></fo:table-cell>
+          </fo:table-row>
+        </fo:table-header>
+
+        <fo:table-body>
+          <fo:table-row>
+            <fo:table-cell padding="4pt"><fo:block>Widget A</fo:block></fo:table-cell>
+            <fo:table-cell padding="4pt"><fo:block>10</fo:block></fo:table-cell>
+            <fo:table-cell padding="4pt"><fo:block>$100.00</fo:block></fo:table-cell>
+          </fo:table-row>
+          <fo:table-row>
+            <fo:table-cell padding="4pt"><fo:block>Widget B</fo:block></fo:table-cell>
+            <fo:table-cell padding="4pt"><fo:block>5</fo:block></fo:table-cell>
+            <fo:table-cell padding="4pt"><fo:block>$50.00</fo:block></fo:table-cell>
+          </fo:table-row>
+        </fo:table-body>
+      </fo:table>
+
+      <fo:block space-before="12pt" text-align="right" font-weight="bold">
+        Total: $150.00
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

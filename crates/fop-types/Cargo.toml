@@ -1,0 +1,18 @@
+[package]
+name = "fop-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Core types for Apache FOP Rust implementation"
+documentation = "https://docs.rs/fop-types"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories = ["text-processing", "data-structures"]
+keywords = ["xsl-fo", "types", "length", "color", "expression"]
+readme = "README.md"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]

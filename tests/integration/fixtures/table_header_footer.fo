@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin="20mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="14pt" font-weight="bold" space-after="12pt">
+        Table with Header and Footer
+      </fo:block>
+
+      <fo:table border="2pt solid black">
+        <fo:table-column column-width="50%"/>
+        <fo:table-column column-width="50%"/>
+
+        <fo:table-header>
+          <fo:table-row background-color="#CCCCCC">
+            <fo:table-cell border="1pt solid black" padding="4pt">
+              <fo:block font-weight="bold">Column 1</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="4pt">
+              <fo:block font-weight="bold">Column 2</fo:block>
+            </fo:table-cell>
+          </fo:table-row>
+        </fo:table-header>
+
+        <fo:table-footer>
+          <fo:table-row background-color="#EEEEEE">
+            <fo:table-cell border="1pt solid black" padding="4pt">
+              <fo:block font-style="italic">Footer 1</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="4pt">
+              <fo:block font-style="italic">Footer 2</fo:block>
+            </fo:table-cell>
+          </fo:table-row>
+        </fo:table-footer>
+
+        <fo:table-body>
+          <fo:table-row>
+            <fo:table-cell border="1pt solid black" padding="4pt">
+              <fo:block>Data 1,1</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="4pt">
+              <fo:block>Data 1,2</fo:block>
+            </fo:table-cell>
+          </fo:table-row>
+          <fo:table-row>
+            <fo:table-cell border="1pt solid black" padding="4pt">
+              <fo:block>Data 2,1</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="4pt">
+              <fo:block>Data 2,2</fo:block>
+            </fo:table-cell>
+          </fo:table-row>
+        </fo:table-body>
+      </fo:table>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

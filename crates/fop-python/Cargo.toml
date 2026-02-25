@@ -1,0 +1,28 @@
+[package]
+name = "fop-python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Python bindings for Apache FOP - XSL-FO to PDF converter"
+documentation = "https://docs.rs/fop-python"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+categories = ["api-bindings"]
+keywords = ["xsl-fo", "pdf", "python", "bindings"]
+publish = false
+
+[lib]
+name = "fop"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+fop-types = { workspace = true }
+fop-core = { workspace = true }
+fop-layout = { workspace = true }
+fop-render = { workspace = true, default-features = false }
+pyo3 = { workspace = true }

@@ -1,0 +1,24 @@
+[package]
+name = "fop-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Core FO tree parsing and property system for Apache FOP"
+documentation = "https://docs.rs/fop-core"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories = ["text-processing", "parser-implementations"]
+keywords = ["xsl-fo", "xml", "parser", "formatting-objects"]
+readme = "README.md"
+
+[dependencies]
+fop-types = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }
+criterion = { workspace = true }
+

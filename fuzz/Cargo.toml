@@ -1,0 +1,24 @@
+[package]
+name = "fop-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fop-core = { path = "../crates/fop-core" }
+
+[[bin]]
+name = "fuzz_xml_parser"
+path = "fuzz_targets/fuzz_xml_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_property_parser"
+path = "fuzz_targets/fuzz_property_parser.rs"
+test = false
+doc = false

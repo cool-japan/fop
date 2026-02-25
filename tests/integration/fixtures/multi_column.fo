@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="two-column"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin="20mm">
+      <fo:region-body column-count="2" column-gap="10mm"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="two-column">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="16pt" font-weight="bold" space-after="12pt">
+        Multi-Column Layout Test
+      </fo:block>
+
+      <fo:block space-after="12pt">
+        This document tests multi-column layout. The text should flow across two columns.
+        When the first column is full, the content should continue in the second column.
+      </fo:block>
+
+      <fo:block space-after="12pt">
+        Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor
+        incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud
+        exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+      </fo:block>
+
+      <fo:block space-after="12pt">
+        Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu
+        fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in
+        culpa qui officia deserunt mollit anim id est laborum.
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

@@ -1,0 +1,29 @@
+[package]
+name = "fop-pdf-renderer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Pure Rust PDF-to-image renderer for fop"
+documentation = "https://docs.rs/fop-pdf-renderer"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+categories = ["rendering", "graphics"]
+keywords = ["pdf", "renderer", "rasterizer", "image"]
+
+[dependencies]
+thiserror = { workspace = true }
+log = { workspace = true }
+flate2 = { workspace = true }
+ttf-parser = { workspace = true }
+png = { workspace = true }
+jpeg-decoder = { workspace = true }
+tiny-skia = { workspace = true }
+
+[[bin]]
+name = "fop-render-pdf"
+path = "src/bin/fop_render_pdf.rs"
+
+[dev-dependencies]
+env_logger = { workspace = true }

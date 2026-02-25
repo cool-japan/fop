@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fop2"
+version = "0.1.0"
+description = "Apache FOP - XSL-FO to PDF converter (Rust implementation)"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [{ name = "COOLJAPAN OU (Team Kitasan)" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+[tool.maturin]
+features = ["extension-module"]
+manifest-path = "Cargo.toml"
+module-name = "fop"
+python-source = "python"

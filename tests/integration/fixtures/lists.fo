@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin="20mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="14pt" font-weight="bold" space-after="12pt">
+        Lists Test
+      </fo:block>
+
+      <fo:list-block provisional-distance-between-starts="18pt" space-after="12pt">
+        <fo:list-item>
+          <fo:list-item-label end-indent="label-end()">
+            <fo:block>1.</fo:block>
+          </fo:list-item-label>
+          <fo:list-item-body start-indent="body-start()">
+            <fo:block>First item</fo:block>
+          </fo:list-item-body>
+        </fo:list-item>
+
+        <fo:list-item>
+          <fo:list-item-label end-indent="label-end()">
+            <fo:block>2.</fo:block>
+          </fo:list-item-label>
+          <fo:list-item-body start-indent="body-start()">
+            <fo:block>Second item</fo:block>
+          </fo:list-item-body>
+        </fo:list-item>
+
+        <fo:list-item>
+          <fo:list-item-label end-indent="label-end()">
+            <fo:block>3.</fo:block>
+          </fo:list-item-label>
+          <fo:list-item-body start-indent="body-start()">
+            <fo:block>Third item</fo:block>
+          </fo:list-item-body>
+        </fo:list-item>
+      </fo:list-block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

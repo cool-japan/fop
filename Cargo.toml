@@ -1,0 +1,126 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fop-types",
+    "crates/fop-core",
+    "crates/fop-layout",
+    "crates/fop-render",
+    "crates/fop-cli",
+    "crates/fop-wasm",
+    "crates/fop-python",
+    "crates/fop-pdf-renderer",
+]
+# Exclude Python/WASM bindings from default builds (use maturin for fop-python, wasm-pack for fop-wasm)
+default-members = [
+    ".",
+    "crates/fop-types",
+    "crates/fop-core",
+    "crates/fop-layout",
+    "crates/fop-render",
+    "crates/fop-pdf-renderer",
+    "crates/fop-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["COOLJAPAN OU (Team Kitasan)"]
+license = "Apache-2.0"
+repository = "https://github.com/cool-japan/fop"
+homepage = "https://github.com/cool-japan/fop"
+
+[package]
+name = "fop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "FOP (Formatting Objects Processor) — Apache FOP-compatible XSL-FO processor in pure Rust"
+documentation = "https://docs.rs/fop"
+categories = ["text-processing", "parser-implementations", "rendering"]
+keywords = ["xsl-fo", "pdf", "formatter", "xml", "typography"]
+readme = "README.md"
+autoexamples = false
+
+[dependencies]
+fop-types = { workspace = true }
+fop-core = { workspace = true }
+fop-layout = { workspace = true }
+fop-render = { workspace = true, features = ["raster"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+png = { workspace = true }
+tempfile = { workspace = true }
+ttf-parser = { workspace = true }
+fop-pdf-renderer = { workspace = true }
+
+[workspace.dependencies]
+# Internal fop-* crates
+fop-types = { path = "crates/fop-types", version = "0.1.0" }
+fop-core = { path = "crates/fop-core", version = "0.1.0" }
+fop-layout = { path = "crates/fop-layout", version = "0.1.0" }
+fop-render = { path = "crates/fop-render", version = "0.1.0", default-features = false }
+fop-pdf-renderer = { path = "crates/fop-pdf-renderer", version = "0.1.0" }
+fop-cli = { path = "crates/fop-cli", version = "0.1.0" }
+# External dependencies
+thiserror = "2.0"
+log = "0.4"
+quick-xml = { version = "0.39", features = ["serialize"] }
+criterion = "0.8"
+png = "0.18"
+jpeg-decoder = "0.3"
+flate2 = "1.1"
+ttf-parser = "0.25"
+pyo3 = { version = "0.24", features = ["abi3-py38"] }
+env_logger = "0.11"
+tiny-skia = "0.12"
+tempfile = "3.26"
+image = "0.25"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "cargo"] }
+indicatif = "0.18"
+console = "0.16"
+humantime = "2.3"
+bytesize = "2.3"
+serde_json = "1.0"
+resvg = "0.47"
+usvg = "0.47"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+sha2 = "0.10"
+md-5 = "0.10"
+jpeg-encoder = "0.7"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen-test = "0.3"
+assert_cmd = "2.1"
+predicates = "3.1"
+
+[[bench]]
+name = "fop_benchmarks"
+harness = false
+path = "benches/fop_benchmarks.rs"
+
+[[bench]]
+name = "comparison_benchmarks"
+harness = false
+path = "benches/comparison_benchmarks.rs"
+
+[[bench]]
+name = "performance_benchmarks"
+harness = false
+path = "benches/performance_benchmarks.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration/mod.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

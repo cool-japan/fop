@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin="20mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="14pt" font-weight="bold" space-after="12pt">
+        Line Breaking Test
+      </fo:block>
+
+      <fo:block space-before="12pt">
+        This is a very long paragraph that should demonstrate proper line breaking behavior.
+        The line breaking algorithm should handle this gracefully and break lines at appropriate
+        word boundaries. It should not break in the middle of words unless absolutely necessary.
+        This paragraph contains enough text to span multiple lines and demonstrate the line breaking
+        capabilities of the layout engine. The Knuth-Plass algorithm should produce optimal breaks
+        by considering the entire paragraph rather than making greedy line-by-line decisions.
+      </fo:block>
+
+      <fo:block space-before="12pt">
+        Supercalifragilisticexpialidocious is a very long word that may need special handling.
+        Pneumonoultramicroscopicsilicovolcanoconiosis is even longer. Incomprehensibilities
+        and antidisestablishmentarianism are also quite lengthy. The layout engine should
+        handle these gracefully.
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

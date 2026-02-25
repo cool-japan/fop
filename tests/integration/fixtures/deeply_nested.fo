@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin="20mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block margin-left="0pt">
+        Level 1
+        <fo:block margin-left="10pt">
+          Level 2
+          <fo:block margin-left="10pt">
+            Level 3
+            <fo:block margin-left="10pt">
+              Level 4
+              <fo:block margin-left="10pt">
+                Level 5
+                <fo:block margin-left="10pt">
+                  Level 6
+                  <fo:block margin-left="10pt">
+                    Level 7
+                    <fo:block margin-left="10pt">
+                      Level 8
+                      <fo:block margin-left="10pt">
+                        Level 9
+                        <fo:block margin-left="10pt">
+                          Level 10 (deeply nested)
+                        </fo:block>
+                      </fo:block>
+                    </fo:block>
+                  </fo:block>
+                </fo:block>
+              </fo:block>
+            </fo:block>
+          </fo:block>
+        </fo:block>
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

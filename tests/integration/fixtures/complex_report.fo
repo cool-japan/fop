@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="report-page"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin-top="15mm"
+                          margin-bottom="15mm"
+                          margin-left="20mm"
+                          margin-right="20mm">
+      <fo:region-body margin-top="20mm" margin-bottom="20mm"/>
+      <fo:region-before extent="15mm"/>
+      <fo:region-after extent="15mm"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="report-page">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="20pt" font-weight="bold" text-align="center" space-after="18pt">
+        Annual Report 2024
+      </fo:block>
+
+      <fo:block font-size="16pt" font-weight="bold" color="#0066CC" space-before="12pt" space-after="8pt">
+        Executive Summary
+      </fo:block>
+
+      <fo:block space-after="12pt">
+        This report presents the key findings and achievements of our organization for the fiscal year 2024.
+        Our team has successfully delivered multiple projects and exceeded our revenue targets by 15%.
+      </fo:block>
+
+      <fo:block font-size="16pt" font-weight="bold" color="#0066CC" space-before="12pt" space-after="8pt">
+        Financial Performance
+      </fo:block>
+
+      <fo:table space-before="12pt" border="2pt solid black">
+        <fo:table-column column-width="40%"/>
+        <fo:table-column column-width="30%"/>
+        <fo:table-column column-width="30%"/>
+
+        <fo:table-header>
+          <fo:table-row background-color="#CCCCCC">
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block font-weight="bold">Category</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block font-weight="bold">2023</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block font-weight="bold">2024</fo:block>
+            </fo:table-cell>
+          </fo:table-row>
+        </fo:table-header>
+
+        <fo:table-body>
+          <fo:table-row>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block>Revenue</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block>$1,000,000</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block>$1,150,000</fo:block>
+            </fo:table-cell>
+          </fo:table-row>
+          <fo:table-row>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block>Expenses</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block>$750,000</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block>$800,000</fo:block>
+            </fo:table-cell>
+          </fo:table-row>
+          <fo:table-row background-color="#EEEEEE">
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block font-weight="bold">Net Profit</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block font-weight="bold">$250,000</fo:block>
+            </fo:table-cell>
+            <fo:table-cell border="1pt solid black" padding="6pt">
+              <fo:block font-weight="bold">$350,000</fo:block>
+            </fo:table-cell>
+          </fo:table-row>
+        </fo:table-body>
+      </fo:table>
+
+      <fo:block font-size="16pt" font-weight="bold" color="#0066CC" space-before="12pt" space-after="8pt">
+        Key Achievements
+      </fo:block>
+
+      <fo:list-block provisional-distance-between-starts="20pt" space-after="12pt">
+        <fo:list-item space-after="6pt">
+          <fo:list-item-label end-indent="label-end()">
+            <fo:block>1.</fo:block>
+          </fo:list-item-label>
+          <fo:list-item-body start-indent="body-start()">
+            <fo:block>Launched three new products successfully</fo:block>
+          </fo:list-item-body>
+        </fo:list-item>
+
+        <fo:list-item space-after="6pt">
+          <fo:list-item-label end-indent="label-end()">
+            <fo:block>2.</fo:block>
+          </fo:list-item-label>
+          <fo:list-item-body start-indent="body-start()">
+            <fo:block>Expanded to two new markets</fo:block>
+          </fo:list-item-body>
+        </fo:list-item>
+
+        <fo:list-item space-after="6pt">
+          <fo:list-item-label end-indent="label-end()">
+            <fo:block>3.</fo:block>
+          </fo:list-item-label>
+          <fo:list-item-body start-indent="body-start()">
+            <fo:block>Increased customer satisfaction by 20%</fo:block>
+          </fo:list-item-body>
+        </fo:list-item>
+      </fo:list-block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

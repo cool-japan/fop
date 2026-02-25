@@ -1,0 +1,34 @@
+[package]
+name = "fop-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "WebAssembly bindings for Apache FOP - XSL-FO to PDF converter"
+documentation = "https://docs.rs/fop-wasm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+categories = ["wasm", "web-programming"]
+keywords = ["xsl-fo", "pdf", "wasm", "webassembly"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fop-types = { workspace = true }
+fop-core = { workspace = true }
+fop-layout = { workspace = true }
+fop-render = { workspace = true, default-features = false }
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+
+[dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-mutable-globals", "--enable-reference-types", "--enable-multivalue"]
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin="20mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="14pt" font-weight="bold" space-after="12pt">
+        Unicode and Multilingual Text
+      </fo:block>
+
+      <fo:block space-before="6pt">
+        English: Hello, World!
+      </fo:block>
+
+      <fo:block space-before="6pt">
+        Japanese: こんにちは世界
+      </fo:block>
+
+      <fo:block space-before="6pt">
+        Chinese: 你好世界
+      </fo:block>
+
+      <fo:block space-before="6pt">
+        Korean: 안녕하세요
+      </fo:block>
+
+      <fo:block space-before="6pt">
+        German: Grüß Gott
+      </fo:block>
+
+      <fo:block space-before="6pt">
+        French: Bonjour le monde
+      </fo:block>
+
+      <fo:block space-before="6pt">
+        Symbols: ©®™€£¥§¶†‡•…‰′″℃℉№
+      </fo:block>
+
+      <fo:block space-before="6pt">
+        Emoji: 😀😃😄😁🎉🎊🎈
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

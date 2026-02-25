@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin="20mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="14pt" font-weight="bold">
+        Text Formatting Test
+      </fo:block>
+
+      <fo:block space-before="12pt" font-weight="bold">
+        This text is bold.
+      </fo:block>
+
+      <fo:block font-style="italic">
+        This text is italic.
+      </fo:block>
+
+      <fo:block text-decoration="underline">
+        This text is underlined.
+      </fo:block>
+
+      <fo:block font-size="10pt">
+        Small text (10pt)
+      </fo:block>
+
+      <fo:block font-size="16pt">
+        Larger text (16pt)
+      </fo:block>
+
+      <fo:block color="#FF0000">
+        Red text
+      </fo:block>
+
+      <fo:block color="#0000FF">
+        Blue text
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

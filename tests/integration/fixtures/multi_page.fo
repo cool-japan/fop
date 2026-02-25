@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4"
+                          page-width="210mm"
+                          page-height="297mm"
+                          margin="20mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="16pt" font-weight="bold">
+        Page 1
+      </fo:block>
+      <fo:block space-before="12pt">
+        This is content on page 1.
+      </fo:block>
+
+      <fo:block break-before="page" font-size="16pt" font-weight="bold">
+        Page 2
+      </fo:block>
+      <fo:block space-before="12pt">
+        This content is on page 2 after an explicit page break.
+      </fo:block>
+
+      <fo:block break-before="page" font-size="16pt" font-weight="bold">
+        Page 3
+      </fo:block>
+      <fo:block space-before="12pt">
+        This is the third page.
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

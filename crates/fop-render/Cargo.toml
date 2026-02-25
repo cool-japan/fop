@@ -1,0 +1,39 @@
+[package]
+name = "fop-render"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Rendering backends for Apache FOP (PDF, SVG, etc.)"
+documentation = "https://docs.rs/fop-render"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories = ["rendering", "graphics"]
+keywords = ["pdf", "rendering", "xsl-fo", "svg", "postscript"]
+readme = "README.md"
+
+[features]
+default = ["raster"]
+raster = ["resvg", "usvg", "tiny-skia", "jpeg-encoder"]
+
+[dependencies]
+fop-types = { workspace = true }
+fop-layout = { workspace = true }
+fop-core = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+png = { workspace = true }
+jpeg-decoder = { workspace = true }
+flate2 = { workspace = true }
+ttf-parser = { workspace = true }
+resvg = { workspace = true, optional = true }
+usvg = { workspace = true, optional = true }
+tiny-skia = { workspace = true, optional = true }
+jpeg-encoder = { workspace = true, optional = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }

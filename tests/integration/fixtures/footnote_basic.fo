@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4"
+        page-height="297mm" page-width="210mm"
+        margin-top="25mm" margin-bottom="25mm"
+        margin-left="25mm" margin-right="25mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-size="12pt">
+        This text contains a footnote reference.<fo:footnote>
+          <fo:inline baseline-shift="super" font-size="8pt">1</fo:inline>
+          <fo:footnote-body>
+            <fo:block font-size="8pt">1. This is the footnote text placed at the bottom of the page.</fo:block>
+          </fo:footnote-body>
+        </fo:footnote>
+      </fo:block>
+      <fo:block font-size="12pt">
+        Another paragraph with a second footnote.<fo:footnote>
+          <fo:inline baseline-shift="super" font-size="8pt">2</fo:inline>
+          <fo:footnote-body>
+            <fo:block font-size="8pt">2. This is the second footnote text.</fo:block>
+          </fo:footnote-body>
+        </fo:footnote>
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>

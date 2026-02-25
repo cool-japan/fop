@@ -1,0 +1,49 @@
+[package]
+name = "fop-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Command-line interface for Apache FOP - XSL-FO to PDF converter"
+documentation = "https://docs.rs/fop-cli"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories = ["command-line-utilities", "text-processing"]
+keywords = ["xsl-fo", "pdf", "cli", "command-line"]
+readme = "README.md"
+
+[[bin]]
+name = "fop"
+path = "src/main.rs"
+
+[dependencies]
+# FOP crates
+fop-types = { workspace = true }
+fop-core = { workspace = true }
+fop-layout = { workspace = true }
+fop-render = { workspace = true, features = ["raster"] }
+
+# CLI and argument parsing
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+# Progress reporting and output
+indicatif = { workspace = true }
+console = { workspace = true }
+
+# Logging
+env_logger = { workspace = true }
+log = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+humantime = { workspace = true }
+bytesize = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
