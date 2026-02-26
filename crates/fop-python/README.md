@@ -12,6 +12,8 @@ This crate is part of the **COOLJAPAN FOP ecosystem** and is built with [PyO3](h
 
 > **Note:** The PyPI package name is **`fop2`** (install with `pip install fop2`), but you import it as **`import fop`** in Python.
 
+> **v0.1.0** was released on **2026-02-25** — the first public release of fop-python.
+
 ---
 
 ## Description
@@ -336,10 +338,14 @@ use fop_layout::LayoutEngine;
 use fop_render::PdfRenderer;
 use std::io::Cursor;
 
-let fo_tree = FoTreeBuilder::new().parse(Cursor::new(fo_xml)).unwrap();
-let area_tree = LayoutEngine::new().layout(&fo_tree).unwrap();
-let pdf_doc = PdfRenderer::new().render(&area_tree).unwrap();
-let pdf_bytes = pdf_doc.to_bytes().unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let fo_xml = "<fo:root>...</fo:root>";
+    let fo_tree = FoTreeBuilder::new().parse(Cursor::new(fo_xml))?;
+    let area_tree = LayoutEngine::new().layout(&fo_tree)?;
+    let pdf_doc = PdfRenderer::new().render(&area_tree)?;
+    let pdf_bytes = pdf_doc.to_bytes()?;
+    Ok(())
+}
 ```
 
 ---
@@ -417,7 +423,7 @@ The underlying rendering engine supports the following XSL-FO 1.1 elements:
 
 ## License
 
-Copyright 2025 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 

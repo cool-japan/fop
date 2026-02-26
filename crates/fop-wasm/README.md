@@ -10,6 +10,8 @@ WebAssembly bindings for [FOP](https://github.com/cool-japan/fop) -- a high-perf
 
 **Pure Rust implementation compiled to WebAssembly -- no native dependencies required.**
 
+> **v0.1.0** released on 2026-02-25 -- initial public release with PDF, SVG, and text output support.
+
 ---
 
 ## Features
@@ -429,7 +431,7 @@ COOLJAPAN OU (Team Kitasan)
 
 ## License
 
-Copyright 2024-2025 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](https://github.com/cool-japan/fop/blob/main/LICENSE) for details.
 
