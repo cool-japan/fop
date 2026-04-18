@@ -397,14 +397,8 @@ fn decode_stream_data(dict: &PdfDictionary, raw: &[u8]) -> Result<Vec<u8>> {
 fn decompress_filter(filter: &str, data: &[u8]) -> Result<Vec<u8>> {
     match filter {
         "FlateDecode" | "Fl" => {
-            use flate2::read::ZlibDecoder;
-            use std::io::Read;
-            let mut decoder = ZlibDecoder::new(data);
-            let mut out = Vec::new();
-            decoder
-                .read_to_end(&mut out)
-                .map_err(|e| PdfRenderError::Decompress(e.to_string()))?;
-            Ok(out)
+            oxiarc_deflate::zlib_decompress(data)
+                .map_err(|e| PdfRenderError::Decompress(e.to_string()))
         }
         "DCTDecode" | "DCT" => {
             // JPEG — return as-is, caller handles decoding

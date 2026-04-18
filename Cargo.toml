@@ -72,7 +72,7 @@ quick-xml = { version = "0.39", features = ["serialize"] }
 criterion = "0.8"
 png = "0.18"
 jpeg-decoder = "0.3"
-flate2 = "1.1"
+oxiarc-deflate = "0.2.5"
 ttf-parser = "0.25"
 pyo3 = { version = "0.24", features = ["abi3-py38"] }
 env_logger = "0.11"
@@ -118,6 +118,10 @@ path = "benches/performance_benchmarks.rs"
 [[test]]
 name = "integration"
 path = "tests/integration/mod.rs"
+
+[patch.crates-io]
+oxiarc-deflate = { path = "../oxiarc/oxiarc-deflate" }
+oxiarc-core = { path = "../oxiarc/oxiarc-core" }
 
 [profile.release]
 lto = true

@@ -3,11 +3,10 @@
 //! Handles embedding images (PNG, JPEG) as XObjects in PDF documents.
 
 use crate::image::{ImageFormat, ImageInfo};
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
+use oxiarc_deflate::zlib_compress;
 use fop_types::Result;
 use jpeg_decoder::Decoder;
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 
 /// PDF Image XObject representation
 #[derive(Debug, Clone)]
@@ -192,13 +191,8 @@ impl ImageXObject {
 
     /// Compress data using zlib (FlateDecode)
     fn compress_data(data: &[u8]) -> Result<Vec<u8>> {
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(data)
-            .map_err(|e| fop_types::FopError::Generic(format!("Compression error: {}", e)))?;
-        encoder
-            .finish()
-            .map_err(|e| fop_types::FopError::Generic(format!("Compression finish error: {}", e)))
+        zlib_compress(data, 6)
+            .map_err(|e| fop_types::FopError::Generic(format!("Compression error: {}", e)))
     }
 
     /// Generate the PDF XObject dictionary and stream

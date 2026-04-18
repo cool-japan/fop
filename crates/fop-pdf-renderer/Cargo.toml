@@ -15,7 +15,7 @@ keywords = ["pdf", "renderer", "rasterizer", "image"]
 [dependencies]
 thiserror = { workspace = true }
 log = { workspace = true }
-flate2 = { workspace = true }
+oxiarc-deflate = { workspace = true }
 ttf-parser = { workspace = true }
 png = { workspace = true }
 jpeg-decoder = { workspace = true }
