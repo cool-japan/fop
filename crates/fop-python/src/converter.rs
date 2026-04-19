@@ -571,65 +571,75 @@ mod tests {
 
     #[test]
     fn test_convert_file_to_pdf() {
-        let input = "/tmp/fop_python_test_input.fo";
-        let output = "/tmp/fop_python_test_output.pdf";
-        std::fs::write(input, SIMPLE_FO).expect("write input");
+        let input = std::env::temp_dir().join("fop_python_test_input.fo");
+        let output = std::env::temp_dir().join("fop_python_test_output.pdf");
+        let input_str = input.to_str().expect("temp_dir path is valid UTF-8");
+        let output_str = output.to_str().expect("temp_dir path is valid UTF-8");
+        std::fs::write(&input, SIMPLE_FO).expect("write input");
         let converter = FopConverter::new();
-        let result = converter.convert_file(input, output);
+        let result = converter.convert_file(input_str, output_str);
         assert!(
             result.is_ok(),
             "convert_file to PDF should work: {:?}",
             result.err()
         );
-        let bytes = std::fs::read(output).expect("read output");
+        let bytes = std::fs::read(&output).expect("read output");
         assert!(bytes.starts_with(b"%PDF-"), "Output should be valid PDF");
         // cleanup
-        let _ = std::fs::remove_file(input);
-        let _ = std::fs::remove_file(output);
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
     }
 
     #[test]
     fn test_convert_file_to_svg() {
-        let input = "/tmp/fop_python_test_svg_input.fo";
-        let output = "/tmp/fop_python_test_svg_output.svg";
-        std::fs::write(input, SIMPLE_FO).expect("write input");
+        let input = std::env::temp_dir().join("fop_python_test_svg_input.fo");
+        let output = std::env::temp_dir().join("fop_python_test_svg_output.svg");
+        let input_str = input.to_str().expect("temp_dir path is valid UTF-8");
+        let output_str = output.to_str().expect("temp_dir path is valid UTF-8");
+        std::fs::write(&input, SIMPLE_FO).expect("write input");
         let converter = FopConverter::new();
-        let result = converter.convert_file(input, output);
+        let result = converter.convert_file(input_str, output_str);
         assert!(
             result.is_ok(),
             "convert_file to SVG should work: {:?}",
             result.err()
         );
-        let content = std::fs::read_to_string(output).expect("read output");
+        let content = std::fs::read_to_string(&output).expect("read output");
         assert!(content.contains("<svg"), "Output should be SVG");
         // cleanup
-        let _ = std::fs::remove_file(input);
-        let _ = std::fs::remove_file(output);
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
     }
 
     #[test]
     fn test_convert_file_to_text() {
-        let input = "/tmp/fop_python_test_txt_input.fo";
-        let output = "/tmp/fop_python_test_txt_output.txt";
-        std::fs::write(input, SIMPLE_FO).expect("write input");
+        let input = std::env::temp_dir().join("fop_python_test_txt_input.fo");
+        let output = std::env::temp_dir().join("fop_python_test_txt_output.txt");
+        let input_str = input.to_str().expect("temp_dir path is valid UTF-8");
+        let output_str = output.to_str().expect("temp_dir path is valid UTF-8");
+        std::fs::write(&input, SIMPLE_FO).expect("write input");
         let converter = FopConverter::new();
-        let result = converter.convert_file(input, output);
+        let result = converter.convert_file(input_str, output_str);
         assert!(
             result.is_ok(),
             "convert_file to text should work: {:?}",
             result.err()
         );
-        let content = std::fs::read_to_string(output).expect("read output");
+        let content = std::fs::read_to_string(&output).expect("read output");
         assert!(!content.is_empty(), "Text output should not be empty");
         // cleanup
-        let _ = std::fs::remove_file(input);
-        let _ = std::fs::remove_file(output);
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
     }
 
     #[test]
     fn test_convert_file_nonexistent_input() {
         let converter = FopConverter::new();
-        let result = converter.convert_file("/tmp/does_not_exist_xyz.fo", "/tmp/out.pdf");
+        let nonexistent = std::env::temp_dir().join("does_not_exist_xyz.fo");
+        let out_path = std::env::temp_dir().join("out.pdf");
+        let nonexistent_str = nonexistent.to_str().expect("temp_dir path is valid UTF-8");
+        let out_str = out_path.to_str().expect("temp_dir path is valid UTF-8");
+        let result = converter.convert_file(nonexistent_str, out_str);
         assert!(result.is_err(), "Non-existent input should return error");
     }
 

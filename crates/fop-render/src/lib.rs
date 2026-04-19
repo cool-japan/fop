@@ -15,8 +15,9 @@ pub use fop_types::{FopError, Result};
 pub use image::{ImageFormat, ImageInfo, ImagePlacement};
 pub use parallel::ParallelRenderer;
 pub use pdf::{
-    EncryptionAlgorithm, EncryptionDict, FontConfig, PdfCompliance, PdfDocument, PdfGraphics,
-    PdfPermissions, PdfRenderer, PdfSecurity, PdfValidator, ValidationResult,
+    EncryptionAlgorithm, EncryptionDict, FontConfig, PdfBuiltinFont, PdfCompliance, PdfDocument,
+    PdfGraphics, PdfPermissions, PdfRenderer, PdfSecurity, PdfValidator, SimpleDocumentBuilder,
+    ValidationResult,
 };
 pub use ps::{PsDocument, PsRenderer};
 #[cfg(feature = "raster")]

@@ -366,12 +366,13 @@ mod tests {
             height: 4,
             pixels: vec![128u8; 4 * 4 * 4],
         };
-        let path = "/tmp/fop_rasterizer_test_output.png";
-        page.save_png(path).expect("save_png should succeed");
-        assert!(std::path::Path::new(path).exists(), "PNG file should exist");
-        let data = std::fs::read(path).expect("test: should succeed");
+        let path = std::env::temp_dir().join("fop_rasterizer_test_output.png");
+        let path_str = path.to_str().expect("temp_dir path is valid UTF-8");
+        page.save_png(path_str).expect("save_png should succeed");
+        assert!(path.exists(), "PNG file should exist");
+        let data = std::fs::read(&path).expect("test: should succeed");
         assert!(!data.is_empty());
-        std::fs::remove_file(path).ok();
+        std::fs::remove_file(&path).ok();
     }
 
     // -----------------------------------------------------------------------

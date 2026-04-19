@@ -22,6 +22,7 @@ fop-types = { workspace = true }
 fop-core = { workspace = true }
 fop-layout = { workspace = true }
 fop-render = { workspace = true, features = ["raster"] }
+fop-pdf-renderer = { workspace = true }
 
 # CLI and argument parsing
 clap = { workspace = true }

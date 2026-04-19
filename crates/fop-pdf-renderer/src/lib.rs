@@ -29,6 +29,7 @@ pub mod image;
 pub mod parser;
 pub mod rasterizer;
 pub mod text;
+pub mod text_extract;
 
 pub use error::{PdfRenderError, Result};
 pub use rasterizer::RasterPage;
@@ -76,6 +77,28 @@ impl PdfRenderer {
         }
         Ok(pages)
     }
+
+    /// Extract user-visible text from a single page.
+    ///
+    /// Best-effort: PDFs with obfuscated encodings or missing ToUnicode CMaps
+    /// may return '?' placeholders for unmapped glyphs.
+    pub fn extract_text(&self, page_index: usize) -> Result<String> {
+        let page = self.doc.get_page(page_index)?;
+        let mut extractor = text_extract::TextExtractor::new(&self.doc);
+        extractor.extract_page(&page)
+    }
+
+    /// Extract user-visible text from all pages, joined with `"\n\n"`.
+    pub fn extract_all_text(&self) -> Result<String> {
+        let mut out = String::new();
+        for i in 0..self.page_count() {
+            if i > 0 {
+                out.push_str("\n\n");
+            }
+            out.push_str(&self.extract_text(i)?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -103,5 +126,98 @@ mod tests {
         if let Ok(r) = renderer {
             assert_eq!(r.page_count(), 1);
         }
+    }
+
+    /// Build a minimal hand-crafted PDF with WinAnsi text `(Hello World)Tj`
+    /// and a standard Type1 font resource.  Used to verify `extract_text`.
+    fn build_text_pdf(text: &str) -> Vec<u8> {
+        let stream_content = format!(
+            "BT /F1 12 Tf 72 700 Td ({}) Tj ET",
+            text
+        );
+        let content = stream_content.as_bytes();
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"%PDF-1.4\n");
+
+        // Obj 1: Catalog
+        let o1 = out.len();
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        // Obj 2: Pages
+        let o2 = out.len();
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+        // Obj 4: Content stream
+        let o4 = out.len();
+        out.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        out.extend_from_slice(content);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+
+        // Obj 3: Page with Helvetica font resource
+        let o3 = out.len();
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+              /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>\nendobj\n",
+        );
+
+        let xref_pos = out.len();
+        out.extend_from_slice(b"xref\n0 5\n");
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        out.extend_from_slice(format!("{:010} 00000 n \n", o1).as_bytes());
+        out.extend_from_slice(format!("{:010} 00000 n \n", o2).as_bytes());
+        out.extend_from_slice(format!("{:010} 00000 n \n", o3).as_bytes());
+        out.extend_from_slice(format!("{:010} 00000 n \n", o4).as_bytes());
+        out.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R >>\n");
+        out.extend_from_slice(b"startxref\n");
+        out.extend_from_slice(format!("{}\n", xref_pos).as_bytes());
+        out.extend_from_slice(b"%%EOF\n");
+        out
+    }
+
+    #[test]
+    fn test_extract_text_round_trips_through_fop() {
+        let pdf_bytes = build_text_pdf("Hello World");
+        let renderer =
+            PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
+        assert_eq!(renderer.page_count(), 1);
+        let text = renderer.extract_text(0).expect("extract_text should succeed");
+        assert!(
+            text.contains("Hello"),
+            "extracted text should contain 'Hello', got {:?}",
+            text
+        );
+        assert!(
+            text.contains("World"),
+            "extracted text should contain 'World', got {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_extract_all_text_single_page() {
+        let pdf_bytes = build_text_pdf("FooBar");
+        let renderer =
+            PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
+        let text = renderer
+            .extract_all_text()
+            .expect("extract_all_text should succeed");
+        assert!(
+            text.contains("FooBar"),
+            "extract_all_text should contain 'FooBar', got {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_extract_text_out_of_bounds_returns_error() {
+        let pdf_bytes = build_text_pdf("x");
+        let renderer =
+            PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
+        assert!(
+            renderer.extract_text(999).is_err(),
+            "out-of-bounds page index should return error"
+        );
     }
 }

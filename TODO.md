@@ -115,7 +115,12 @@ fop/
   - [x] Public API: `renderer.render_page(page_num, dpi) -> RasterPage`
   - [x] Public API: `renderer.save_as_png(page, path)`
   - [x] CLI tool: `fop-render-pdf input.pdf output.png` (src/bin/fop_render_pdf.rs)
-  - [ ] Integration with auto-verify workflow
+  - [x] Integration with auto-verify workflow
+    - [x] Replace external-tool tests in `regression_tests.rs` with pure-Rust verifications
+    - [x] Expand `verify_tests.rs` fixture coverage from 4 → 17 fixtures
+    - [x] Add `--render-verify` CLI flag wired to `fop-pdf-renderer`
+    - [x] Add `.github/workflows/ci.yml` running `fmt`/`clippy`/`nextest`/`doc` on Linux+macOS+Windows without poppler/gs
+    - [x] Add `PdfRenderer::extract_text(page_index) -> Result<String>` to `fop-pdf-renderer` (prerequisite for regression tests)
 
 **Dependencies (Pure Rust):**
 - `pdf` or `lopdf` - PDF parsing (evaluate both)

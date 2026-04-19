@@ -209,8 +209,12 @@ impl AreaTree {
     /// Serialize the area tree as an indented text tree for debugging
     pub fn serialize(&self) -> String {
         let mut output = String::new();
-        if let Some((root_id, _)) = self.root() {
-            self.serialize_node(root_id, 0, &mut output);
+        // Walk all parentless roots to handle multi-page-sequence documents
+        // where each page-sequence creates a separate top-level Page area.
+        for (id, node) in self.iter() {
+            if node.parent.is_none() {
+                self.serialize_node(id, 0, &mut output);
+            }
         }
         output
     }

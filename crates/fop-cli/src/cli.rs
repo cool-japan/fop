@@ -306,6 +306,10 @@ pub struct Cli {
     /// Validate generated PDF after rendering
     #[arg(long)]
     pub validate: bool,
+
+    /// Re-parse and rasterize the generated PDF as a self-verification step (PDF output only)
+    #[arg(long, help = "Re-parse and rasterize the generated PDF as a self-verification step (PDF output only)")]
+    pub render_verify: bool,
 }
 
 /// Output format enum for type-safe handling

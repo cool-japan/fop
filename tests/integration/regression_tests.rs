@@ -188,60 +188,20 @@ fn regression_benchmark_rendering_speed() {
 }
 
 #[test]
-fn regression_pdfinfo_validates_output() {
-    // Use pdfinfo (poppler) to validate the generated PDF structure
-    let pdfinfo_path = "/usr/bin/pdfinfo";
-    if !std::path::Path::new(pdfinfo_path).exists() {
-        eprintln!("pdfinfo not found, skipping PDF validation test");
-        return;
-    }
+fn regression_single_page_count() {
+    let fo = super::load_fixture("simple_single_page.fo");
+    let pdf = super::process_fo_document(&fo)
+        .expect("simple_single_page.fo should generate a valid PDF");
 
-    let pdf_bytes = process_fo_document(BASELINE_FO)
-        .expect("PDF generation should succeed");
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
+        .expect("PDF should be parseable by fop-pdf-renderer");
+    assert_eq!(renderer.page_count(), 1, "simple_single_page.fo should produce exactly 1 page");
 
-    let tmp_path = std::env::temp_dir().join("fop_regression_test.pdf");
-    std::fs::write(&tmp_path, &pdf_bytes).expect("Writing temp PDF should succeed");
-
-    // Run pdfinfo to validate the PDF
-    let output = std::process::Command::new(pdfinfo_path)
-        .arg(&tmp_path)
-        .output()
-        .expect("pdfinfo should run");
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&tmp_path);
-
-    assert!(
-        output.status.success(),
-        "pdfinfo should exit with success for a valid PDF. stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let pdfinfo_output = String::from_utf8_lossy(&output.stdout);
-
-    // Verify pdfinfo reports 1 page
-    assert!(
-        pdfinfo_output.contains("Pages:") && pdfinfo_output.contains("1"),
-        "pdfinfo should report at least 1 page: {}",
-        pdfinfo_output
-    );
-
-    // Verify it reports a PDF version
-    assert!(
-        pdfinfo_output.contains("PDF version:") || pdfinfo_output.contains("PDF Version:"),
-        "pdfinfo should report PDF version: {}",
-        pdfinfo_output
-    );
+    super::validate_pdf_bytes(&pdf);
 }
 
 #[test]
-fn regression_pdfinfo_two_page_document() {
-    let pdfinfo_path = "/usr/bin/pdfinfo";
-    if !std::path::Path::new(pdfinfo_path).exists() {
-        eprintln!("pdfinfo not found, skipping PDF validation test");
-        return;
-    }
-
+fn regression_two_page_count() {
     // Two separate page-sequences = 2 pages
     let fo_input = r##"<?xml version="1.0" encoding="UTF-8"?>
 <fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
@@ -265,86 +225,51 @@ fn regression_pdfinfo_two_page_document() {
   </fo:page-sequence>
 </fo:root>"##;
 
-    let pdf_bytes = process_fo_document(fo_input)
-        .expect("PDF generation should succeed");
+    let pdf = process_fo_document(fo_input)
+        .expect("Two-page FO document should generate a valid PDF");
 
-    let tmp_path = std::env::temp_dir().join("fop_two_page_test.pdf");
-    std::fs::write(&tmp_path, &pdf_bytes).expect("Writing temp PDF should succeed");
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
+        .expect("PDF should be parseable by fop-pdf-renderer");
+    assert_eq!(renderer.page_count(), 2, "Two-page FO should produce exactly 2 pages");
+}
 
-    let output = std::process::Command::new(pdfinfo_path)
-        .arg(&tmp_path)
-        .output()
-        .expect("pdfinfo should run");
+#[test]
+fn regression_all_pages_rasterize() {
+    let fo = super::load_fixture("simple_single_page.fo");
+    let pdf = super::process_fo_document(&fo)
+        .expect("simple_single_page.fo should generate a valid PDF");
 
-    let _ = std::fs::remove_file(&tmp_path);
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
+        .expect("PDF should be parseable by fop-pdf-renderer");
 
+    let pages = renderer.render_all_pages(72.0)
+        .expect("All pages should rasterize successfully");
+
+    assert!(!pages.is_empty(), "PDF should have at least one rasterized page");
+    for (i, page_bytes) in pages.iter().enumerate() {
+        // Verify each page is a valid PNG (starts with PNG magic bytes)
+        assert!(page_bytes.len() >= 8, "Page {} PNG should have at least 8 bytes", i);
+        assert_eq!(
+            &page_bytes[0..8],
+            b"\x89PNG\r\n\x1a\n",
+            "Page {} should start with PNG magic bytes",
+            i
+        );
+    }
+
+    // Additional assertion the old external tool didn't check: render dimensions
+    let page = renderer.render_page(0, 72.0)
+        .expect("First page should rasterize");
     assert!(
-        output.status.success(),
-        "pdfinfo should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let pdfinfo_output = String::from_utf8_lossy(&output.stdout);
-
-    // pdfinfo outputs "Pages:           2" (with variable spacing) for a 2-page document
-    let pages_line = pdfinfo_output
-        .lines()
-        .find(|l| l.trim_start().starts_with("Pages:"))
-        .unwrap_or("");
-    let pages_value = pages_line.split(':').nth(1).unwrap_or("").trim();
-    assert_eq!(
-        pages_value, "2",
-        "Two-page document should report 2 pages in pdfinfo: {}",
-        pdfinfo_output
+        page.width > 0 && page.height > 0,
+        "Rasterized page should have non-zero dimensions: {}x{}",
+        page.width,
+        page.height
     );
 }
 
 #[test]
-fn regression_ghostscript_validates_pdf() {
-    // Use ghostscript to validate PDF structure and render to null device
-    let gs_path = "/usr/bin/gs";
-    if !std::path::Path::new(gs_path).exists() {
-        eprintln!("ghostscript not found, skipping");
-        return;
-    }
-
-    // Generate a PDF using the existing helper
-    let pdf_bytes = super::process_fo_document(BASELINE_FO)
-        .expect("PDF generation should succeed");
-
-    let tmp_path = std::env::temp_dir().join("fop_gs_validation_test.pdf");
-    std::fs::write(&tmp_path, &pdf_bytes).expect("Writing temp PDF should succeed");
-
-    // gs -dNOPAUSE -dBATCH -sDEVICE=nullpage validates PDF without rendering to a file
-    let output = std::process::Command::new(gs_path)
-        .args([
-            "-dNOPAUSE",
-            "-dBATCH",
-            "-sDEVICE=nullpage",
-            "-q",
-            tmp_path.to_str().expect("test: should succeed"),
-        ])
-        .output()
-        .expect("ghostscript should run");
-
-    let _ = std::fs::remove_file(&tmp_path);
-
-    assert!(
-        output.status.success(),
-        "Ghostscript should successfully process the PDF. stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn regression_pdftotext_extracts_content() {
-    // Use pdftotext to verify text content is correctly embedded in the PDF
-    let pdftotext_path = "/usr/bin/pdftotext";
-    if !std::path::Path::new(pdftotext_path).exists() {
-        eprintln!("pdftotext not found, skipping");
-        return;
-    }
-
+fn regression_extracted_text_roundtrips() {
     let fo_input = r##"<?xml version="1.0" encoding="UTF-8"?>
 <fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
   <fo:layout-master-set>
@@ -362,32 +287,23 @@ fn regression_pdftotext_extracts_content() {
   </fo:page-sequence>
 </fo:root>"##;
 
-    let pdf_bytes = super::process_fo_document(fo_input)
-        .expect("PDF generation should succeed");
+    let pdf = super::process_fo_document(fo_input)
+        .expect("FO with Helvetica text should generate a valid PDF");
 
-    let tmp_path = std::env::temp_dir().join("fop_pdftotext_test.pdf");
-    std::fs::write(&tmp_path, &pdf_bytes).expect("Writing temp PDF should succeed");
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
+        .expect("PDF should be parseable");
 
-    // Run pdftotext to extract text, output to stdout
-    let output = std::process::Command::new(pdftotext_path)
-        .args([tmp_path.to_str().expect("test: should succeed"), "-"])
-        .output()
-        .expect("pdftotext should run");
-
-    let _ = std::fs::remove_file(&tmp_path);
+    let text = renderer.extract_text(0)
+        .expect("Text extraction should succeed");
 
     assert!(
-        output.status.success(),
-        "pdftotext should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !text.is_empty(),
+        "Extracted text should not be empty — got empty string. \
+         Check if Helvetica text is being emitted with ToUnicode CMap."
     );
-
-    let extracted_text = String::from_utf8_lossy(&output.stdout);
-    // The text should be extractable from the PDF
-    // Note: with composite fonts (CIDFont), text extraction may not always work
-    // but the PDF structure should still be valid
     assert!(
-        !extracted_text.is_empty() || output.status.success(),
-        "PDF should be parseable by pdftotext"
+        text.contains("EXTRACTABLE TEXT CONTENT"),
+        "Extracted text should contain 'EXTRACTABLE TEXT CONTENT' but got: {:?}",
+        text
     );
 }

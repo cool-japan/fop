@@ -202,3 +202,44 @@ fn test_json_output_format() {
         .stdout(predicate::str::contains(r#""layout""#))
         .stdout(predicate::str::contains(r#""rendering""#));
 }
+
+#[test]
+fn test_render_verify_flag_succeeds_for_valid_pdf() {
+    let temp_dir = TempDir::new().expect("test: should succeed");
+    let input_path = temp_dir.path().join("input.fo");
+    let output_path = temp_dir.path().join("test_render_verify.pdf");
+
+    fs::write(&input_path, SIMPLE_FO).expect("test: should succeed");
+
+    Command::cargo_bin("fop")
+        .expect("test: should succeed")
+        .arg(&input_path)
+        .arg(&output_path)
+        .arg("--render-verify")
+        .assert()
+        .success();
+
+    // Clean up output file
+    let _ = fs::remove_file(&output_path);
+}
+
+#[test]
+fn test_render_verify_flag_no_op_for_non_pdf_output() {
+    let temp_dir = TempDir::new().expect("test: should succeed");
+    let input_path = temp_dir.path().join("input.fo");
+    let output_path = temp_dir.path().join("test_render_verify_noop.svg");
+
+    fs::write(&input_path, SIMPLE_FO).expect("test: should succeed");
+
+    // --render-verify with SVG output should be a silent no-op (success, no error)
+    Command::cargo_bin("fop")
+        .expect("test: should succeed")
+        .arg(&input_path)
+        .arg(&output_path)
+        .arg("--render-verify")
+        .assert()
+        .success();
+
+    // Clean up output file
+    let _ = fs::remove_file(&output_path);
+}

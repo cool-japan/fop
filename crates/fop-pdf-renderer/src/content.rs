@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 /// A content stream token
 #[derive(Debug, Clone)]
-enum Token {
+pub(crate) enum Token {
     Number(f64),
     Name(String),
     StringBytes(Vec<u8>),
@@ -26,17 +26,17 @@ enum Token {
     Operator(String),
 }
 
-struct Tokenizer<'a> {
+pub(crate) struct Tokenizer<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Tokenizer<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
-    fn next_token(&mut self) -> Option<Token> {
+    pub(crate) fn next_token(&mut self) -> Option<Token> {
         self.skip_whitespace_and_comments();
         if self.pos >= self.data.len() {
             return None;
