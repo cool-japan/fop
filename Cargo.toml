@@ -119,9 +119,7 @@ path = "benches/performance_benchmarks.rs"
 name = "integration"
 path = "tests/integration/mod.rs"
 
-[patch.crates-io]
-oxiarc-deflate = { path = "../oxiarc/oxiarc-deflate" }
-oxiarc-core = { path = "../oxiarc/oxiarc-core" }
+
 
 [profile.release]
 lto = true
