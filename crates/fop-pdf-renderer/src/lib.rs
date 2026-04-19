@@ -24,6 +24,7 @@
 pub mod content;
 pub mod error;
 pub mod font;
+pub mod glyph;
 pub mod graphics;
 pub mod image;
 pub mod parser;

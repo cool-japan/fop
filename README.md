@@ -7,7 +7,8 @@
 
 A high-performance, pure Rust reimplementation of [Apache FOP](https://xmlgraphics.apache.org/fop/) (Formatting Objects Processor), translating XSL-FO documents to PDF, SVG, PostScript, raster images, and plain text.
 
-**166 Rust files · 71,069 lines of code · 616+ tests · Zero warnings · 10–1200× faster than Java FOP**
+**168 Rust files · 72,373 lines of code · 2,814+ tests · Zero warnings · 10–1200× faster than Java FOP**
+<!-- stats regenerated: 2026-04-20 -->
 
 ## Project Status
 
@@ -22,7 +23,7 @@ A high-performance, pure Rust reimplementation of [Apache FOP](https://xmlgraphi
 | Phase 5: Advanced Features | ✅ Complete | Image rendering, links, bookmarks, font embedding, i18n, encryption |
 | Phase 6: Optimization | 🔄 85% Complete | Performance (✅), streaming (✅), testing (✅) |
 
-**Current stats:** 616+ tests (all passing), 0 compiler warnings, 0 clippy warnings, **10–1200× faster than Java FOP**
+**Current stats:** 2,814+ tests (all passing), 0 compiler warnings, 0 clippy warnings, **10–1200× faster than Java FOP**
 
 ## Key Features
 
@@ -58,6 +59,28 @@ A high-performance, pure Rust reimplementation of [Apache FOP](https://xmlgraphi
 - **Parallel rendering infrastructure** for multi-core utilization
 - **10–1200× faster** than Java FOP across all benchmarks
 - **<10ms startup** vs ~2000ms JVM cold start
+
+### Self-verification (Pure Rust)
+
+The `fop-pdf-renderer` crate parses and rasterizes PDF output with no C dependencies (no poppler, no Ghostscript). Use it programmatically or from the CLI:
+
+```rust
+use fop_pdf_renderer::PdfRenderer;
+
+let renderer = PdfRenderer::from_bytes(&pdf_bytes)?;
+let page = renderer.render_page(0, 150.0)?;  // 150 DPI → RasterPage
+let text = renderer.extract_text(0)?;        // user-visible text extraction
+```
+
+CLI equivalents:
+
+```bash
+# Round-trip self-verification (generates PDF then rasterizes it internally)
+fop input.fo output.pdf --render-verify
+
+# Standalone PDF → PNG conversion
+fop-render-pdf output.pdf page.png 150
+```
 
 ### Bindings
 - **CLI** — Apache FOP-compatible command-line interface with progress bars and JSON stats
@@ -347,10 +370,14 @@ XSL-FO XML ──→ FO Tree ──→ Area Tree ──→ Output (PDF/SVG/PS/PN
 
 ### Testing
 
-- **616+ tests** — unit, integration, and fuzz targets
+- **2,814+ tests** — unit, integration, and fuzz targets
 - **Zero warnings** — enforced via `cargo clippy --all-targets -- -D warnings`
 - **Fuzz testing** — `fuzz_xml_parser`, `fuzz_property_parser`, `fuzz_layout`
 - **PDF self-verification** — `fop-pdf-renderer` renders generated PDFs back to compare
+
+### Continuous Integration
+
+`.github/workflows/ci.yml` runs `fmt`, `clippy -D warnings`, `cargo nextest`, and `doc -D warnings` on every push and PR across **Linux, macOS, and Windows** (stable Rust). No poppler or Ghostscript is installed on any runner — the auto-verify path is exercised end-to-end through the pure-Rust `fop-pdf-renderer`. Python (PyO3) and WASM bindings are built in a dedicated job that installs the required toolchains.
 
 ## Development
 

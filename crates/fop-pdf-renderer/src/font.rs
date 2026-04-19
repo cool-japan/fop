@@ -6,11 +6,66 @@
 use crate::parser::{PdfDictionary, PdfDocument};
 use std::collections::HashMap;
 
+/// Simple font encoding type parsed from /Encoding entry.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SimpleEncoding {
+    #[default]
+    WinAnsi,
+    MacRoman,
+    Standard,
+    Identity,
+}
+
+/// WinAnsiEncoding byte-to-Unicode table (PDF Reference 1.7, Appendix D).
+/// Index = byte value (0..=255), value = Unicode codepoint (0 = unmapped).
+pub static WIN_ANSI_TABLE: [u16; 256] = [
+    // 0x00–0x1F: control chars (unmapped)
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    // 0x20–0x7E: ASCII (direct mapping)
+    0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027,
+    0x0028, 0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x002E, 0x002F,
+    0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037,
+    0x0038, 0x0039, 0x003A, 0x003B, 0x003C, 0x003D, 0x003E, 0x003F,
+    0x0040, 0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047,
+    0x0048, 0x0049, 0x004A, 0x004B, 0x004C, 0x004D, 0x004E, 0x004F,
+    0x0050, 0x0051, 0x0052, 0x0053, 0x0054, 0x0055, 0x0056, 0x0057,
+    0x0058, 0x0059, 0x005A, 0x005B, 0x005C, 0x005D, 0x005E, 0x005F,
+    0x0060, 0x0061, 0x0062, 0x0063, 0x0064, 0x0065, 0x0066, 0x0067,
+    0x0068, 0x0069, 0x006A, 0x006B, 0x006C, 0x006D, 0x006E, 0x006F,
+    0x0070, 0x0071, 0x0072, 0x0073, 0x0074, 0x0075, 0x0076, 0x0077,
+    0x0078, 0x0079, 0x007A, 0x007B, 0x007C, 0x007D, 0x007E,
+    // 0x7F: undefined
+    0,
+    // 0x80–0x9F: Windows-1252 extensions
+    0x20AC, 0,      0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0,      0x017D, 0,
+    0,      0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
+    // 0xA0–0xFF: Latin-1 supplement (direct mapping)
+    0x00A0, 0x00A1, 0x00A2, 0x00A3, 0x00A4, 0x00A5, 0x00A6, 0x00A7,
+    0x00A8, 0x00A9, 0x00AA, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x00AF,
+    0x00B0, 0x00B1, 0x00B2, 0x00B3, 0x00B4, 0x00B5, 0x00B6, 0x00B7,
+    0x00B8, 0x00B9, 0x00BA, 0x00BB, 0x00BC, 0x00BD, 0x00BE, 0x00BF,
+    0x00C0, 0x00C1, 0x00C2, 0x00C3, 0x00C4, 0x00C5, 0x00C6, 0x00C7,
+    0x00C8, 0x00C9, 0x00CA, 0x00CB, 0x00CC, 0x00CD, 0x00CE, 0x00CF,
+    0x00D0, 0x00D1, 0x00D2, 0x00D3, 0x00D4, 0x00D5, 0x00D6, 0x00D7,
+    0x00D8, 0x00D9, 0x00DA, 0x00DB, 0x00DC, 0x00DD, 0x00DE, 0x00DF,
+    0x00E0, 0x00E1, 0x00E2, 0x00E3, 0x00E4, 0x00E5, 0x00E6, 0x00E7,
+    0x00E8, 0x00E9, 0x00EA, 0x00EB, 0x00EC, 0x00ED, 0x00EE, 0x00EF,
+    0x00F0, 0x00F1, 0x00F2, 0x00F3, 0x00F4, 0x00F5, 0x00F6, 0x00F7,
+    0x00F8, 0x00F9, 0x00FA, 0x00FB, 0x00FC, 0x00FD, 0x00FE, 0x00FF,
+];
+
 /// A loaded PDF font with CID→Unicode and CID→glyph-ID mappings
 #[derive(Debug, Clone)]
 pub struct LoadedFont {
     /// Subtype: "Type1", "TrueType", "Type0", "CIDFontType2", etc.
     pub subtype: String,
+    /// Base font name (PDF /BaseFont entry, e.g. "Helvetica")
+    pub base_font: String,
+    /// Simple font encoding (for Type1/TrueType without ToUnicode)
+    pub encoding: SimpleEncoding,
     /// CID → Unicode character mapping (from ToUnicode CMap)
     pub cid_to_unicode: HashMap<u32, char>,
     /// CID → GID mapping (for embedded TrueType fonts)
@@ -29,6 +84,24 @@ impl LoadedFont {
     /// Load a font from a PDF font dictionary
     pub fn load(doc: &PdfDocument, font_dict: &PdfDictionary) -> Self {
         let subtype = font_dict.get_name("Subtype").unwrap_or("").to_string();
+
+        // Parse /BaseFont name (strip leading slash if present in raw name strings)
+        let base_font = font_dict
+            .get_name("BaseFont")
+            .unwrap_or("")
+            .trim_start_matches('/')
+            .to_string();
+
+        // Parse /Encoding — only handle Name variants; dict (with /Differences) falls back to WinAnsi
+        let encoding = match font_dict.get("Encoding") {
+            Some(crate::parser::PdfObject::Name(s)) => match s.as_str() {
+                "WinAnsiEncoding" => SimpleEncoding::WinAnsi,
+                "MacRomanEncoding" => SimpleEncoding::MacRoman,
+                "StandardEncoding" => SimpleEncoding::Standard,
+                _ => SimpleEncoding::Identity,
+            },
+            _ => SimpleEncoding::WinAnsi,
+        };
 
         // Parse ToUnicode CMap
         let cid_to_unicode = doc
@@ -58,6 +131,8 @@ impl LoadedFont {
 
         LoadedFont {
             subtype,
+            base_font,
+            encoding,
             cid_to_unicode,
             cid_to_gid,
             font_data,
@@ -75,6 +150,28 @@ impl LoadedFont {
     /// Get advance width for a CID in glyph units
     pub fn advance_width(&self, cid: u32) -> f32 {
         self.widths.get(&cid).copied().unwrap_or(self.default_width)
+    }
+
+    /// Map CID to GID, falling back to identity (CID == GID) if not in table.
+    pub fn cid_to_gid_or_identity(&self, cid: u32) -> u16 {
+        self.cid_to_gid.get(&cid).copied().unwrap_or(cid as u16)
+    }
+
+    /// Map a simple-font byte to a Unicode codepoint using this font's encoding.
+    pub fn simple_byte_to_char(encoding: SimpleEncoding, byte: u8) -> Option<char> {
+        let cp = match encoding {
+            SimpleEncoding::WinAnsi => {
+                let v = WIN_ANSI_TABLE[byte as usize];
+                if v == 0 {
+                    return None;
+                }
+                v as u32
+            }
+            SimpleEncoding::MacRoman | SimpleEncoding::Standard | SimpleEncoding::Identity => {
+                byte as u32 // Latin-1 fallback
+            }
+        };
+        char::from_u32(cp)
     }
 }
 
@@ -116,7 +213,31 @@ fn load_type0_info(doc: &PdfDocument, font_dict: &PdfDictionary) -> Type0Info {
         .unwrap_or_default();
 
     // Parse CIDToGIDMap
-    let cid_to_gid = HashMap::new(); // identity map by default
+    // Format: binary stream where byte_offset = CID * 2, value = u16 GID big-endian.
+    // /Identity (or absent) means identity mapping — empty HashMap signals identity fallback.
+    let cid_to_gid: HashMap<u32, u16> = {
+        let mut map = HashMap::new();
+        if let Some(obj) = descendant.get("CIDToGIDMap") {
+            match obj {
+                crate::parser::PdfObject::Name(s) if s == "Identity" => {
+                    // identity mapping — empty map means identity fallback in cid_to_gid_or_identity()
+                }
+                crate::parser::PdfObject::Reference(n, _) => {
+                    let obj_num = *n;
+                    if let Ok(bytes) = doc.decode_stream(obj_num) {
+                        for (cid, chunk) in bytes.chunks_exact(2).enumerate() {
+                            let gid = u16::from_be_bytes([chunk[0], chunk[1]]);
+                            if gid != 0 {
+                                map.insert(cid as u32, gid);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        map
+    };
 
     (cid_to_gid, font_data, widths, default_width, units_per_em)
 }
@@ -474,6 +595,8 @@ mod tests {
         cid_to_unicode.insert(65u32, 'A');
         let font = LoadedFont {
             subtype: "TrueType".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode,
             cid_to_gid: HashMap::new(),
             font_data: None,
@@ -488,6 +611,8 @@ mod tests {
     fn test_loaded_font_cid_to_char_unknown_cid() {
         let font = LoadedFont {
             subtype: "TrueType".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode: HashMap::new(),
             cid_to_gid: HashMap::new(),
             font_data: None,
@@ -504,6 +629,8 @@ mod tests {
         widths.insert(65u32, 750.0f32);
         let font = LoadedFont {
             subtype: "TrueType".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode: HashMap::new(),
             cid_to_gid: HashMap::new(),
             font_data: None,
@@ -518,6 +645,8 @@ mod tests {
     fn test_loaded_font_advance_width_default_for_unknown_cid() {
         let font = LoadedFont {
             subtype: "TrueType".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode: HashMap::new(),
             cid_to_gid: HashMap::new(),
             font_data: None,
@@ -532,6 +661,8 @@ mod tests {
     fn test_loaded_font_subtype_type0_detection() {
         let font = LoadedFont {
             subtype: "Type0".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode: HashMap::new(),
             cid_to_gid: HashMap::new(),
             font_data: None,
@@ -546,6 +677,8 @@ mod tests {
     fn test_loaded_font_no_font_data() {
         let font = LoadedFont {
             subtype: "Type1".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode: HashMap::new(),
             cid_to_gid: HashMap::new(),
             font_data: None,
@@ -560,6 +693,8 @@ mod tests {
     fn test_loaded_font_with_embedded_data() {
         let font = LoadedFont {
             subtype: "TrueType".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode: HashMap::new(),
             cid_to_gid: HashMap::new(),
             font_data: Some(vec![0u8; 100]),
@@ -624,6 +759,8 @@ mod tests {
         cid_to_unicode.insert(97u32, 'a');
         let font = LoadedFont {
             subtype: "TrueType".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode,
             cid_to_gid: HashMap::new(),
             font_data: None,
@@ -641,6 +778,8 @@ mod tests {
     fn test_loaded_font_with_embedded_data_length() {
         let font = LoadedFont {
             subtype: "TrueType".to_string(),
+            base_font: String::new(),
+            encoding: SimpleEncoding::WinAnsi,
             cid_to_unicode: HashMap::new(),
             cid_to_gid: HashMap::new(),
             font_data: Some(vec![0u8; 100]),

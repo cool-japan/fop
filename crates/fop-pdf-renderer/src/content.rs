@@ -828,11 +828,20 @@ impl<'a> ContentInterpreter<'a> {
             // Font size in user space
             let font_size = self.text_state.font_size * ctm.a.abs();
 
-            // Get character
+            // Get character — try ToUnicode CMap first, then fall back to
+            // WinAnsi/Standard encoding for simple (non-composite) fonts.
             let character = self
                 .font_cache
                 .get(&font_name)
-                .and_then(|f| f.cid_to_char(cid));
+                .and_then(|f| {
+                    f.cid_to_char(cid).or_else(|| {
+                        if !is_composite && cid <= 255 {
+                            crate::font::LoadedFont::simple_byte_to_char(f.encoding, cid as u8)
+                        } else {
+                            None
+                        }
+                    })
+                });
 
             // Get advance width
             let advance_units = self
