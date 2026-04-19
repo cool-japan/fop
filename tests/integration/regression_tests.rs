@@ -54,13 +54,24 @@ fn regression_area_tree_structure() {
     let serialized = area_tree.serialize();
 
     // Structural assertions: should have a Page area at root
-    assert!(serialized.contains("Page"), "Area tree must contain a Page area: {}", serialized);
+    assert!(
+        serialized.contains("Page"),
+        "Area tree must contain a Page area: {}",
+        serialized
+    );
 
     // Should have at least one Block area
-    assert!(serialized.contains("Block"), "Area tree must contain Block areas: {}", serialized);
+    assert!(
+        serialized.contains("Block"),
+        "Area tree must contain Block areas: {}",
+        serialized
+    );
 
     // Should have text content
-    assert!(serialized.contains("Visual regression"), "Area tree must contain the first text block");
+    assert!(
+        serialized.contains("Visual regression"),
+        "Area tree must contain the first text block"
+    );
 
     // Page geometry: A4 = 595.28 x 841.89 pt (within 1pt tolerance)
     assert!(
@@ -72,8 +83,7 @@ fn regression_area_tree_structure() {
 
 #[test]
 fn regression_pdf_output_size() {
-    let pdf_bytes = process_fo_document(BASELINE_FO)
-        .expect("PDF generation should succeed");
+    let pdf_bytes = process_fo_document(BASELINE_FO).expect("PDF generation should succeed");
 
     validate_pdf_bytes(&pdf_bytes);
 
@@ -132,7 +142,11 @@ fn regression_page_count_stable() {
 
     // Count occurrences of "Page (" in the serialized output
     let page_count = serialized.matches("Page (").count();
-    assert_eq!(page_count, 2, "Document with two page-sequences should have exactly 2 pages, got: {}", page_count);
+    assert_eq!(
+        page_count, 2,
+        "Document with two page-sequences should have exactly 2 pages, got: {}",
+        page_count
+    );
 }
 
 #[test]
@@ -172,8 +186,7 @@ fn regression_benchmark_rendering_speed() {
 
     let start = Instant::now();
 
-    let pdf_bytes = process_fo_document(&fo_input)
-        .expect("PDF generation should succeed");
+    let pdf_bytes = process_fo_document(&fo_input).expect("PDF generation should succeed");
 
     let elapsed = start.elapsed();
 
@@ -190,12 +203,16 @@ fn regression_benchmark_rendering_speed() {
 #[test]
 fn regression_single_page_count() {
     let fo = super::load_fixture("simple_single_page.fo");
-    let pdf = super::process_fo_document(&fo)
-        .expect("simple_single_page.fo should generate a valid PDF");
+    let pdf =
+        super::process_fo_document(&fo).expect("simple_single_page.fo should generate a valid PDF");
 
     let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
         .expect("PDF should be parseable by fop-pdf-renderer");
-    assert_eq!(renderer.page_count(), 1, "simple_single_page.fo should produce exactly 1 page");
+    assert_eq!(
+        renderer.page_count(),
+        1,
+        "simple_single_page.fo should produce exactly 1 page"
+    );
 
     super::validate_pdf_bytes(&pdf);
 }
@@ -225,30 +242,42 @@ fn regression_two_page_count() {
   </fo:page-sequence>
 </fo:root>"##;
 
-    let pdf = process_fo_document(fo_input)
-        .expect("Two-page FO document should generate a valid PDF");
+    let pdf =
+        process_fo_document(fo_input).expect("Two-page FO document should generate a valid PDF");
 
     let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
         .expect("PDF should be parseable by fop-pdf-renderer");
-    assert_eq!(renderer.page_count(), 2, "Two-page FO should produce exactly 2 pages");
+    assert_eq!(
+        renderer.page_count(),
+        2,
+        "Two-page FO should produce exactly 2 pages"
+    );
 }
 
 #[test]
 fn regression_all_pages_rasterize() {
     let fo = super::load_fixture("simple_single_page.fo");
-    let pdf = super::process_fo_document(&fo)
-        .expect("simple_single_page.fo should generate a valid PDF");
+    let pdf =
+        super::process_fo_document(&fo).expect("simple_single_page.fo should generate a valid PDF");
 
     let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
         .expect("PDF should be parseable by fop-pdf-renderer");
 
-    let pages = renderer.render_all_pages(72.0)
+    let pages = renderer
+        .render_all_pages(72.0)
         .expect("All pages should rasterize successfully");
 
-    assert!(!pages.is_empty(), "PDF should have at least one rasterized page");
+    assert!(
+        !pages.is_empty(),
+        "PDF should have at least one rasterized page"
+    );
     for (i, page_bytes) in pages.iter().enumerate() {
         // Verify each page is a valid PNG (starts with PNG magic bytes)
-        assert!(page_bytes.len() >= 8, "Page {} PNG should have at least 8 bytes", i);
+        assert!(
+            page_bytes.len() >= 8,
+            "Page {} PNG should have at least 8 bytes",
+            i
+        );
         assert_eq!(
             &page_bytes[0..8],
             b"\x89PNG\r\n\x1a\n",
@@ -258,7 +287,8 @@ fn regression_all_pages_rasterize() {
     }
 
     // Additional assertion the old external tool didn't check: render dimensions
-    let page = renderer.render_page(0, 72.0)
+    let page = renderer
+        .render_page(0, 72.0)
         .expect("First page should rasterize");
     assert!(
         page.width > 0 && page.height > 0,
@@ -290,10 +320,11 @@ fn regression_extracted_text_roundtrips() {
     let pdf = super::process_fo_document(fo_input)
         .expect("FO with Helvetica text should generate a valid PDF");
 
-    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
-        .expect("PDF should be parseable");
+    let renderer =
+        fop_pdf_renderer::PdfRenderer::from_bytes(&pdf).expect("PDF should be parseable");
 
-    let text = renderer.extract_text(0)
+    let text = renderer
+        .extract_text(0)
         .expect("Text extraction should succeed");
 
     assert!(

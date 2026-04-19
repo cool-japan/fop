@@ -521,8 +521,7 @@ impl EncryptionDict {
     pub fn aes128_encrypt_block(&self, data: &[u8; 16]) -> [u8; 16] {
         let cipher = Aes128::new_from_slice(&self.encryption_key[..16])
             .expect("AES-128 key length is 16 bytes");
-        let mut block = aes::Block::try_from(data.as_slice())
-            .expect("block is exactly 16 bytes");
+        let mut block = aes::Block::try_from(data.as_slice()).expect("block is exactly 16 bytes");
         cipher.encrypt_block(&mut block);
         block.into()
     }
@@ -540,8 +539,8 @@ impl EncryptionDict {
         iv_arr.copy_from_slice(&iv);
 
         type Aes256Cbc = cbc::Encryptor<Aes256>;
-        let cipher = Aes256Cbc::new_from_slices(&key[..32], &iv_arr)
-            .expect("AES-256 key/IV lengths valid");
+        let cipher =
+            Aes256Cbc::new_from_slices(&key[..32], &iv_arr).expect("AES-256 key/IV lengths valid");
         let ciphertext = aes256_cbc_encrypt_with_pkcs7(cipher, data);
 
         let mut result = iv_arr.to_vec();
@@ -634,8 +633,7 @@ fn encrypt_aes256_cbc(data: &[u8], key: &[u8], obj_num: u32) -> Vec<u8> {
     iv.copy_from_slice(&iv_hash[..16]);
 
     type Aes256Cbc = cbc::Encryptor<Aes256>;
-    let cipher = Aes256Cbc::new_from_slices(&key[..32], &iv)
-        .expect("AES-256 key/IV lengths valid");
+    let cipher = Aes256Cbc::new_from_slices(&key[..32], &iv).expect("AES-256 key/IV lengths valid");
     let ciphertext = aes256_cbc_encrypt_with_pkcs7(cipher, data);
 
     let mut result = iv.to_vec();
@@ -649,17 +647,14 @@ fn encrypt_aes256_cbc(data: &[u8], key: &[u8], obj_num: u32) -> Vec<u8> {
 fn aes256_cbc_encrypt_no_iv(data: &[u8], key: &[u8]) -> Vec<u8> {
     let iv = [0u8; 16];
     type Aes256Cbc = cbc::Encryptor<Aes256>;
-    let cipher = Aes256Cbc::new_from_slices(&key[..32], &iv)
-        .expect("AES-256 key/IV lengths valid");
+    let cipher = Aes256Cbc::new_from_slices(&key[..32], &iv).expect("AES-256 key/IV lengths valid");
     aes256_cbc_encrypt_with_pkcs7(cipher, data)
 }
 
 /// AES-256-ECB encrypt a single 16-byte block (for /Perms)
 fn aes256_ecb_encrypt_block(data: &[u8; 16], key: &[u8]) -> [u8; 16] {
-    let cipher = Aes256::new_from_slice(&key[..32])
-        .expect("AES-256 key length is 32 bytes");
-    let mut block = aes::Block::try_from(data.as_slice())
-        .expect("block is exactly 16 bytes");
+    let cipher = Aes256::new_from_slice(&key[..32]).expect("AES-256 key length is 32 bytes");
+    let mut block = aes::Block::try_from(data.as_slice()).expect("block is exactly 16 bytes");
     cipher.encrypt_block(&mut block);
     block.into()
 }
@@ -678,10 +673,7 @@ fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
 ///
 /// This avoids the `cipher/alloc` feature requirement by manually padding
 /// and encrypting 16-byte blocks.
-fn aes256_cbc_encrypt_with_pkcs7(
-    mut cipher: cbc::Encryptor<Aes256>,
-    data: &[u8],
-) -> Vec<u8> {
+fn aes256_cbc_encrypt_with_pkcs7(mut cipher: cbc::Encryptor<Aes256>, data: &[u8]) -> Vec<u8> {
     use cbc::cipher::BlockModeEncrypt;
     let padded = pkcs7_pad(data, 16);
     // Process blocks in-place
@@ -690,8 +682,7 @@ fn aes256_cbc_encrypt_with_pkcs7(
     for i in 0..block_count {
         let start = i * 16;
         let end = start + 16;
-        let mut block = aes::Block::try_from(&out[start..end])
-            .expect("block is exactly 16 bytes");
+        let mut block = aes::Block::try_from(&out[start..end]).expect("block is exactly 16 bytes");
         cipher.encrypt_block(&mut block);
         out[start..end].copy_from_slice(&block);
     }

@@ -228,8 +228,7 @@ impl<'a> TextExtractor<'a> {
             }
 
             // ---- Color operators ----
-            "g" | "G" | "rg" | "RG" | "k" | "K" | "cs" | "CS" | "sc" | "SC" | "scn"
-            | "SCN" => {
+            "g" | "G" | "rg" | "RG" | "k" | "K" | "cs" | "CS" | "sc" | "SC" | "scn" | "SCN" => {
                 stack.clear();
             }
 
@@ -358,10 +357,7 @@ mod tests {
     /// Build a minimal 1-page PDF whose content stream is `content`.
     /// If `font_dict_entry` is Some, it is inserted into the Resources/Font dict:
     ///   e.g. `"/F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"`
-    fn build_pdf_with_content_and_font(
-        content: &[u8],
-        font_dict_entry: Option<&str>,
-    ) -> Vec<u8> {
+    fn build_pdf_with_content_and_font(content: &[u8], font_dict_entry: Option<&str>) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(b"%PDF-1.4\n");
 
@@ -383,10 +379,7 @@ mod tests {
         // Object 3: Page — includes Resources/Font if requested
         let o3 = out.len();
         let resources_str = if let Some(font_entry) = font_dict_entry {
-            format!(
-                "/Resources << /Font << {} >> >>",
-                font_entry
-            )
+            format!("/Resources << /Font << {} >> >>", font_entry)
         } else {
             String::new()
         };

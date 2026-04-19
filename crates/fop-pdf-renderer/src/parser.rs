@@ -396,10 +396,8 @@ fn decode_stream_data(dict: &PdfDictionary, raw: &[u8]) -> Result<Vec<u8>> {
 
 fn decompress_filter(filter: &str, data: &[u8]) -> Result<Vec<u8>> {
     match filter {
-        "FlateDecode" | "Fl" => {
-            oxiarc_deflate::zlib_decompress(data)
-                .map_err(|e| PdfRenderError::Decompress(e.to_string()))
-        }
+        "FlateDecode" | "Fl" => oxiarc_deflate::zlib_decompress(data)
+            .map_err(|e| PdfRenderError::Decompress(e.to_string())),
         "DCTDecode" | "DCT" => {
             // JPEG — return as-is, caller handles decoding
             Ok(data.to_vec())

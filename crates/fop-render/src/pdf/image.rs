@@ -3,9 +3,9 @@
 //! Handles embedding images (PNG, JPEG) as XObjects in PDF documents.
 
 use crate::image::{ImageFormat, ImageInfo};
-use oxiarc_deflate::zlib_compress;
 use fop_types::Result;
 use jpeg_decoder::Decoder;
+use oxiarc_deflate::zlib_compress;
 use std::io::Cursor;
 
 /// PDF Image XObject representation

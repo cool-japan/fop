@@ -245,10 +245,7 @@ impl SimpleDocumentBuilder {
         doc.info.title = Some(title.clone());
 
         for page_state in completed_pages {
-            let mut pdf_page = PdfPage::new(
-                Length::from_mm(210.0),
-                Length::from_mm(297.0),
-            );
+            let mut pdf_page = PdfPage::new(Length::from_mm(210.0), Length::from_mm(297.0));
             // Append our raw content stream directly into the page content.
             pdf_page.content.extend_from_slice(&page_state.content);
             doc.add_page(pdf_page);
@@ -264,9 +261,7 @@ impl SimpleDocumentBuilder {
         // Decide whether we need multi-font support: if only Helvetica (F1) is
         // used, we can delegate entirely to the existing serialiser and avoid
         // duplicating serialisation logic.
-        let needs_extra_fonts = used_fonts
-            .iter()
-            .any(|f| *f != BuiltinFont::Helvetica);
+        let needs_extra_fonts = used_fonts.iter().any(|f| *f != BuiltinFont::Helvetica);
 
         if needs_extra_fonts {
             // Write our own minimal PDF that supports all 14 builtin fonts.
@@ -284,7 +279,6 @@ impl SimpleDocumentBuilder {
     pub fn page_height_mm(&self) -> f32 {
         297.0
     }
-
 }
 
 // ── Module-level helpers ──────────────────────────────────────────────────────
@@ -336,9 +330,7 @@ fn write_minimal_pdf(doc: PdfDocument, title: &str) -> Vec<u8> {
         xref_offsets.push(bytes.len());
         bytes.extend_from_slice(format!("{} 0 obj\n", obj_id).as_bytes());
         bytes.extend_from_slice(b"<<\n/Type /Font\n/Subtype /Type1\n");
-        bytes.extend_from_slice(
-            format!("/BaseFont /{}\n", font.base_font_name()).as_bytes(),
-        );
+        bytes.extend_from_slice(format!("/BaseFont /{}\n", font.base_font_name()).as_bytes());
         bytes.extend_from_slice(b">>\nendobj\n");
     }
 
@@ -346,11 +338,7 @@ fn write_minimal_pdf(doc: PdfDocument, title: &str) -> Vec<u8> {
     let mut font_resources = String::from("/Font <<\n");
     for (idx, font) in all_fonts.iter().enumerate() {
         let obj_id = 3 + idx;
-        font_resources.push_str(&format!(
-            "  /{} {} 0 R\n",
-            font.resource_name(),
-            obj_id
-        ));
+        font_resources.push_str(&format!("  /{} {} 0 R\n", font.resource_name(), obj_id));
     }
     font_resources.push_str(">>\n");
 
@@ -374,9 +362,7 @@ fn write_minimal_pdf(doc: PdfDocument, title: &str) -> Vec<u8> {
         bytes.extend_from_slice(b"/Resources <<\n");
         bytes.extend_from_slice(font_resources.as_bytes());
         bytes.extend_from_slice(b">>\n");
-        bytes.extend_from_slice(
-            format!("/Contents {} 0 R\n", content_obj_id).as_bytes(),
-        );
+        bytes.extend_from_slice(format!("/Contents {} 0 R\n", content_obj_id).as_bytes());
         bytes.extend_from_slice(b">>\nendobj\n");
 
         // Content stream
@@ -396,9 +382,7 @@ fn write_minimal_pdf(doc: PdfDocument, title: &str) -> Vec<u8> {
         xref_offsets.push(bytes.len());
         bytes.extend_from_slice(format!("{} 0 obj\n", info_obj_id).as_bytes());
         bytes.extend_from_slice(b"<<\n");
-        bytes.extend_from_slice(
-            format!("/Title ({})\n", escape_pdf_string(title)).as_bytes(),
-        );
+        bytes.extend_from_slice(format!("/Title ({})\n", escape_pdf_string(title)).as_bytes());
         bytes.extend_from_slice(b">>\nendobj\n");
     }
 
@@ -459,7 +443,10 @@ mod tests {
         builder.text("Hello World", 12.0, 20.0, 280.0, BuiltinFont::Helvetica);
         let bytes = builder.save();
         let content = String::from_utf8_lossy(&bytes);
-        assert!(content.contains("Hello World"), "text must appear in PDF bytes");
+        assert!(
+            content.contains("Hello World"),
+            "text must appear in PDF bytes"
+        );
     }
 
     #[test]
@@ -469,8 +456,14 @@ mod tests {
         let bytes = builder.save();
         let content = String::from_utf8_lossy(&bytes);
         // F2 is HelveticaBold
-        assert!(content.contains("F2"), "HelveticaBold must be referenced as F2");
-        assert!(content.contains("Helvetica-Bold"), "Helvetica-Bold font must appear in resources");
+        assert!(
+            content.contains("F2"),
+            "HelveticaBold must be referenced as F2"
+        );
+        assert!(
+            content.contains("Helvetica-Bold"),
+            "Helvetica-Bold font must appear in resources"
+        );
     }
 
     #[test]

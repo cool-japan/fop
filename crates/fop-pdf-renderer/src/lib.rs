@@ -132,10 +132,7 @@ mod tests {
     /// Build a minimal hand-crafted PDF with WinAnsi text `(Hello World)Tj`
     /// and a standard Type1 font resource.  Used to verify `extract_text`.
     fn build_text_pdf(text: &str) -> Vec<u8> {
-        let stream_content = format!(
-            "BT /F1 12 Tf 72 700 Td ({}) Tj ET",
-            text
-        );
+        let stream_content = format!("BT /F1 12 Tf 72 700 Td ({}) Tj ET", text);
         let content = stream_content.as_bytes();
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(b"%PDF-1.4\n");
@@ -180,10 +177,11 @@ mod tests {
     #[test]
     fn test_extract_text_round_trips_through_fop() {
         let pdf_bytes = build_text_pdf("Hello World");
-        let renderer =
-            PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
+        let renderer = PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
         assert_eq!(renderer.page_count(), 1);
-        let text = renderer.extract_text(0).expect("extract_text should succeed");
+        let text = renderer
+            .extract_text(0)
+            .expect("extract_text should succeed");
         assert!(
             text.contains("Hello"),
             "extracted text should contain 'Hello', got {:?}",
@@ -199,8 +197,7 @@ mod tests {
     #[test]
     fn test_extract_all_text_single_page() {
         let pdf_bytes = build_text_pdf("FooBar");
-        let renderer =
-            PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
+        let renderer = PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
         let text = renderer
             .extract_all_text()
             .expect("extract_all_text should succeed");
@@ -214,8 +211,7 @@ mod tests {
     #[test]
     fn test_extract_text_out_of_bounds_returns_error() {
         let pdf_bytes = build_text_pdf("x");
-        let renderer =
-            PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
+        let renderer = PdfRenderer::from_bytes(&pdf_bytes).expect("minimal text PDF should parse");
         assert!(
             renderer.extract_text(999).is_err(),
             "out-of-bounds page index should return error"

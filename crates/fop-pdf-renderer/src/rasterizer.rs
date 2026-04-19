@@ -135,11 +135,7 @@ impl<'a> PageRasterizer<'a> {
     }
 
     /// Load font metadata + bytes for a given PDF font resource name.
-    fn load_font_ext(
-        &self,
-        resources: &PdfDictionary,
-        font_name: &str,
-    ) -> Option<LoadedFontExt> {
+    fn load_font_ext(&self, resources: &PdfDictionary, font_name: &str) -> Option<LoadedFontExt> {
         // Look up the font dict in page resources
         let font_dict = self.doc.get_font(resources, font_name)?;
 
@@ -213,7 +209,10 @@ impl<'a> PageRasterizer<'a> {
             }
 
             DrawCommand::DrawGlyph(glyph) => {
-                let Some(ext) = self.font_cache.get(&glyph.font_name).and_then(|e| e.as_ref())
+                let Some(ext) = self
+                    .font_cache
+                    .get(&glyph.font_name)
+                    .and_then(|e| e.as_ref())
                 else {
                     return Ok(()); // no font available — skip silently
                 };
@@ -347,8 +346,7 @@ fn resolve_glyph_id(
         ttf_parser::GlyphId(font.cid_to_gid_or_identity(glyph.cid))
     } else if let Some(ch) = glyph.character {
         // Simple font: character → glyph index
-        face.glyph_index(ch)
-            .unwrap_or(ttf_parser::GlyphId(0))
+        face.glyph_index(ch).unwrap_or(ttf_parser::GlyphId(0))
     } else {
         // Fallback: treat CID as GID directly
         ttf_parser::GlyphId(glyph.cid as u16)
