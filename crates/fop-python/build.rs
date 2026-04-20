@@ -1,20 +1,30 @@
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let is_extension = std::env::var("CARGO_FEATURE_EXTENSION_MODULE").is_ok();
 
-    if target_os != "macos" {
-        return;
+    match target_os.as_str() {
+        "macos" => {
+            // pyo3 0.22+ no longer auto-adds -undefined dynamic_lookup on macOS.
+            // maturin handles it; for raw cargo builds we emit it here (cdylib only).
+            if is_extension {
+                println!("cargo:rustc-cdylib-link-arg=-undefined");
+                println!("cargo:rustc-cdylib-link-arg=dynamic_lookup");
+            }
+            // Always link Python on macOS so test binaries resolve pyo3 symbols.
+            link_python();
+        }
+        "linux" => {
+            // Extension modules (.so) get Python symbols from the embedding Python
+            // process at load time — no explicit link needed.
+            // Test binaries and rlib builds must link Python explicitly because
+            // pyo3's own build script may not emit the search path on non-standard
+            // Python installations (e.g. conda, CUDA containers).
+            if !is_extension {
+                link_python();
+            }
+        }
+        _ => {}
     }
-
-    // pyo3 0.22+ no longer auto-adds -undefined dynamic_lookup on macOS.
-    // maturin handles it; for raw cargo builds we emit it here (cdylib only).
-    if std::env::var("CARGO_FEATURE_EXTENSION_MODULE").is_ok() {
-        println!("cargo:rustc-cdylib-link-arg=-undefined");
-        println!("cargo:rustc-cdylib-link-arg=dynamic_lookup");
-    }
-
-    // Always link Python on macOS so that test binaries and other non-extension
-    // targets can resolve pyo3 symbols at both link time and runtime.
-    link_python();
 }
 
 fn link_python() {
