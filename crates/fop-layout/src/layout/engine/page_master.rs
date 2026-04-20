@@ -56,30 +56,30 @@ impl LayoutEngine {
             if let Some(child) = fo_tree.get(child_id) {
                 match &child.data {
                     // Direct simple-page-master reference
-                    FoNodeData::SimplePageMaster { master_name, .. } => {
-                        if master_name == master_reference {
-                            return Ok(Some(master_name.clone()));
-                        }
+                    FoNodeData::SimplePageMaster { master_name, .. }
+                        if master_name == master_reference =>
+                    {
+                        return Ok(Some(master_name.clone()));
                     }
                     // Page sequence master with alternatives
-                    FoNodeData::PageSequenceMaster { master_name, .. } => {
-                        if master_name == master_reference {
-                            // Look through alternatives to find matching conditions
-                            let alternatives = fo_tree.children(child_id);
-                            for alt_id in alternatives {
-                                if let Some(alt) = fo_tree.get(alt_id) {
-                                    // fo:single-page-master-reference and
-                                    // fo:repeatable-page-master-reference are not yet
-                                    // represented as distinct FoNodeData variants;
-                                    // they are handled by falling through to the default.
-                                    if let FoNodeData::RepeatablePageMasterAlternatives { .. } =
-                                        &alt.data
-                                    {
-                                        if let Some(selected) = self.evaluate_conditional_masters(
-                                            fo_tree, alt_id, context, is_blank,
-                                        )? {
-                                            return Ok(Some(selected));
-                                        }
+                    FoNodeData::PageSequenceMaster { master_name, .. }
+                        if master_name == master_reference =>
+                    {
+                        // Look through alternatives to find matching conditions
+                        let alternatives = fo_tree.children(child_id);
+                        for alt_id in alternatives {
+                            if let Some(alt) = fo_tree.get(alt_id) {
+                                // fo:single-page-master-reference and
+                                // fo:repeatable-page-master-reference are not yet
+                                // represented as distinct FoNodeData variants;
+                                // they are handled by falling through to the default.
+                                if let FoNodeData::RepeatablePageMasterAlternatives { .. } =
+                                    &alt.data
+                                {
+                                    if let Some(selected) = self.evaluate_conditional_masters(
+                                        fo_tree, alt_id, context, is_blank,
+                                    )? {
+                                        return Ok(Some(selected));
                                     }
                                 }
                             }

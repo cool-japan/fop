@@ -8,9 +8,9 @@
 //!
 //! Pure Rust implementation using `aes`, `cbc`, `sha2`, and `md5` crates — no C FFI.
 
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use aes::{Aes128, Aes256};
-use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+use cbc::cipher::KeyIvInit;
 use md5::Md5;
 use sha2::Digest as _;
 use sha2::Sha256;
@@ -519,9 +519,9 @@ impl EncryptionDict {
     /// Used for encrypting individual 16-byte blocks when needed.
     #[allow(dead_code)]
     pub fn aes128_encrypt_block(&self, data: &[u8; 16]) -> [u8; 16] {
-        let key = aes::cipher::generic_array::GenericArray::from_slice(&self.encryption_key[..16]);
-        let cipher = Aes128::new(key);
-        let mut block = aes::cipher::generic_array::GenericArray::clone_from_slice(data);
+        let cipher = Aes128::new_from_slice(&self.encryption_key[..16])
+            .expect("AES-128 key length is 16 bytes");
+        let mut block = aes::Block::try_from(data.as_slice()).expect("block is exactly 16 bytes");
         cipher.encrypt_block(&mut block);
         block.into()
     }
@@ -538,14 +538,10 @@ impl EncryptionDict {
         let mut iv_arr = [0u8; 16];
         iv_arr.copy_from_slice(&iv);
 
-        let padded = pkcs7_pad(data, 16);
-        let key_arr = aes::cipher::generic_array::GenericArray::from_slice(&key[..32]);
-        let iv_ga = aes::cipher::generic_array::GenericArray::from_slice(&iv_arr);
-
         type Aes256Cbc = cbc::Encryptor<Aes256>;
-        let cipher = Aes256Cbc::new(key_arr, iv_ga);
-        let ciphertext =
-            cipher.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(&padded);
+        let cipher =
+            Aes256Cbc::new_from_slices(&key[..32], &iv_arr).expect("AES-256 key/IV lengths valid");
+        let ciphertext = aes256_cbc_encrypt_with_pkcs7(cipher, data);
 
         let mut result = iv_arr.to_vec();
         result.extend_from_slice(&ciphertext);
@@ -636,12 +632,9 @@ fn encrypt_aes256_cbc(data: &[u8], key: &[u8], obj_num: u32) -> Vec<u8> {
     let mut iv = [0u8; 16];
     iv.copy_from_slice(&iv_hash[..16]);
 
-    let key_arr = aes::cipher::generic_array::GenericArray::from_slice(&key[..32]);
-    let iv_ga = aes::cipher::generic_array::GenericArray::from_slice(&iv);
-
     type Aes256Cbc = cbc::Encryptor<Aes256>;
-    let cipher = Aes256Cbc::new(key_arr, iv_ga);
-    let ciphertext = cipher.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(data);
+    let cipher = Aes256Cbc::new_from_slices(&key[..32], &iv).expect("AES-256 key/IV lengths valid");
+    let ciphertext = aes256_cbc_encrypt_with_pkcs7(cipher, data);
 
     let mut result = iv.to_vec();
     result.extend_from_slice(&ciphertext);
@@ -653,19 +646,15 @@ fn encrypt_aes256_cbc(data: &[u8], key: &[u8], obj_num: u32) -> Vec<u8> {
 /// Uses a zero IV (as per PDF 2.0 spec for key wrapping).
 fn aes256_cbc_encrypt_no_iv(data: &[u8], key: &[u8]) -> Vec<u8> {
     let iv = [0u8; 16];
-    let key_arr = aes::cipher::generic_array::GenericArray::from_slice(&key[..32]);
-    let iv_ga = aes::cipher::generic_array::GenericArray::from_slice(&iv);
-
     type Aes256Cbc = cbc::Encryptor<Aes256>;
-    let cipher = Aes256Cbc::new(key_arr, iv_ga);
-    cipher.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(data)
+    let cipher = Aes256Cbc::new_from_slices(&key[..32], &iv).expect("AES-256 key/IV lengths valid");
+    aes256_cbc_encrypt_with_pkcs7(cipher, data)
 }
 
 /// AES-256-ECB encrypt a single 16-byte block (for /Perms)
 fn aes256_ecb_encrypt_block(data: &[u8; 16], key: &[u8]) -> [u8; 16] {
-    let key_arr = aes::cipher::generic_array::GenericArray::from_slice(&key[..32]);
-    let cipher = Aes256::new(key_arr);
-    let mut block = aes::cipher::generic_array::GenericArray::clone_from_slice(data);
+    let cipher = Aes256::new_from_slice(&key[..32]).expect("AES-256 key length is 32 bytes");
+    let mut block = aes::Block::try_from(data.as_slice()).expect("block is exactly 16 bytes");
     cipher.encrypt_block(&mut block);
     block.into()
 }
@@ -678,6 +667,26 @@ fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
         padded.push(pad_len as u8);
     }
     padded
+}
+
+/// AES-256-CBC encrypt `data` with PKCS7 padding using the given encryptor.
+///
+/// This avoids the `cipher/alloc` feature requirement by manually padding
+/// and encrypting 16-byte blocks.
+fn aes256_cbc_encrypt_with_pkcs7(mut cipher: cbc::Encryptor<Aes256>, data: &[u8]) -> Vec<u8> {
+    use cbc::cipher::BlockModeEncrypt;
+    let padded = pkcs7_pad(data, 16);
+    // Process blocks in-place
+    let mut out = padded;
+    let block_count = out.len() / 16;
+    for i in 0..block_count {
+        let start = i * 16;
+        let end = start + 16;
+        let mut block = aes::Block::try_from(&out[start..end]).expect("block is exactly 16 bytes");
+        cipher.encrypt_block(&mut block);
+        out[start..end].copy_from_slice(&block);
+    }
+    out
 }
 
 /// Derive a deterministic 8-byte salt from a password and a tag

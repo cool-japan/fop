@@ -4,13 +4,15 @@
 [![docs.rs](https://docs.rs/fop-python/badge.svg)](https://docs.rs/fop-python)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/cool-japan/fop/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![PyO3](https://img.shields.io/badge/PyO3-0.24-orange.svg)](https://pyo3.rs/)
+[![PyO3](https://img.shields.io/badge/PyO3-0.28-orange.svg)](https://pyo3.rs/)
 
 Python bindings for [FOP](https://github.com/cool-japan/fop) — a high-performance, pure-Rust XSL-FO processor that converts XSL-FO (Extensible Stylesheet Language Formatting Objects) documents to PDF, SVG, and plain text output.
 
 This crate is part of the **COOLJAPAN FOP ecosystem** and is built with [PyO3](https://pyo3.rs/), providing a native Python extension that runs 10-1200x faster than the original Java Apache FOP.
 
 > **Note:** The PyPI package name is **`fop2`** (install with `pip install fop2`), but you import it as **`import fop`** in Python.
+
+> **v0.1.1** — released **2026-04-20**: upgraded PyO3 to 0.28 (`Python::attach` replaces `Python::with_gil`); added macOS `build.rs` linker fix for `cdylib` targets.
 
 ---
 
@@ -94,7 +96,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fop-python = "0.1.0"
+fop-python = "0.1.1"
 ```
 
 ---
@@ -230,7 +232,7 @@ pdf_bytes = fop.convert_to_pdf(fo_xml)
 svg_string = fop.convert_to_svg(fo_xml)
 
 # Get version
-print(fop.version())  # fop-python 0.1.0
+print(fop.version())  # fop-python 0.1.1
 ```
 
 ### Error handling
@@ -322,7 +324,7 @@ fn main() {
   </fo:page-sequence>
 </fo:root>"#;
 
-    // Returns PyResult<Vec<u8>> — use pyo3::Python::with_gil to call from Rust
+    // Returns PyResult<Vec<u8>> — use pyo3::Python::attach to call from Rust (pyo3 0.28+)
     // For pure Rust usage, prefer the fop-core / fop-render crates directly.
     println!("FopConverter created: {:?}", converter.version());
 }
@@ -336,10 +338,14 @@ use fop_layout::LayoutEngine;
 use fop_render::PdfRenderer;
 use std::io::Cursor;
 
-let fo_tree = FoTreeBuilder::new().parse(Cursor::new(fo_xml)).unwrap();
-let area_tree = LayoutEngine::new().layout(&fo_tree).unwrap();
-let pdf_doc = PdfRenderer::new().render(&area_tree).unwrap();
-let pdf_bytes = pdf_doc.to_bytes().unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let fo_xml = "<fo:root>...</fo:root>";
+    let fo_tree = FoTreeBuilder::new().parse(Cursor::new(fo_xml))?;
+    let area_tree = LayoutEngine::new().layout(&fo_tree)?;
+    let pdf_doc = PdfRenderer::new().render(&area_tree)?;
+    let pdf_bytes = pdf_doc.to_bytes()?;
+    Ok(())
+}
 ```
 
 ---
@@ -417,7 +423,7 @@ The underlying rendering engine supports the following XSL-FO 1.1 elements:
 
 ## License
 
-Copyright 2025 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 

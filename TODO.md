@@ -115,7 +115,17 @@ fop/
   - [x] Public API: `renderer.render_page(page_num, dpi) -> RasterPage`
   - [x] Public API: `renderer.save_as_png(page, path)`
   - [x] CLI tool: `fop-render-pdf input.pdf output.png` (src/bin/fop_render_pdf.rs)
-  - [ ] Integration with auto-verify workflow
+  - [x] Integration with auto-verify workflow
+    - [x] Replace external-tool tests in `regression_tests.rs` with pure-Rust verifications
+    - [x] Expand `verify_tests.rs` fixture coverage from 4 → 17 fixtures
+    - [x] Add `--render-verify` CLI flag wired to `fop-pdf-renderer`
+    - [x] Add `.github/workflows/ci.yml` running `fmt`/`clippy`/`nextest`/`doc` on Linux+macOS+Windows without poppler/gs
+    - [x] Add `PdfRenderer::extract_text(page_index) -> Result<String>` to `fop-pdf-renderer` (prerequisite for regression tests)
+- [x] **Phase 6: Glyph Outline Rendering** (completed 2026-04-20)
+  - [x] Create `glyph.rs` with `OutlinePathBuilder` (ttf-parser → tiny-skia bridge) and standard-14 substitute font discovery with TTC index support
+  - [x] Parse `/CIDToGIDMap` binary stream in `font.rs` (replaces `HashMap::new()` placeholder); add `SimpleEncoding` enum + WinAnsi/Standard tables
+  - [x] Wire `PageRasterizer.font_cache` with `LoadedFontExt` struct; add `base_font` field to `LoadedFont`; remove `#[allow(dead_code)]`
+  - [x] Replace filled-rectangle placeholder at `rasterizer.rs:160-178` with real ttf-parser outline fill via tiny-skia
 
 **Dependencies (Pure Rust):**
 - `pdf` or `lopdf` - PDF parsing (evaluate both)
@@ -171,3 +181,9 @@ assert!(!image.contains_glyph(".notdef"));
 - [x] Increase test coverage for edge cases in property inheritance (added 14 comprehensive edge case tests covering: explicit inherit keyword, percentages, enums, lists, deep chains, border properties, caching, 4-level inheritance, partial overrides)
 - [x] Add integration tests with real-world XSL-FO documents (4 new tests: invoice, report, form, Unicode)
 - [x] Add fuzzing targets for XML parsing (fuzz_xml_parser and fuzz_property_parser)
+- [x] Update `README.md` with accurate test count, file/LoC statistics, and new feature documentation (`--render-verify` CLI flag, `PdfRenderer::extract_text` API, `fop-pdf-renderer` crate, `fop-render-pdf` binary, `.github/workflows/ci.yml` CI workflow) (completed 2026-04-20)
+
+## Version 0.1.1 Fixes and Enhancements (completed 2026-04-20)
+- [x] **PyO3 0.28 migration** — updated `fop-python` to PyO3 0.28 and ported to the new `Python::attach` API (replaces `Python::with_gil`)
+- [x] **macOS build.rs linker fix** — added `build.rs` to `fop-python` to resolve PyO3 ABI3 linker issues on macOS (`-undefined dynamic_lookup` flag)
+- [x] **fop-wasm invalid XML test fixes** — corrected WASM binding error-handling tests to match updated error message format for malformed XML inputs

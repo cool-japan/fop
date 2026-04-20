@@ -23,8 +23,10 @@ mod conformance_table_extended;
 mod error_tests;
 mod i18n_tests;
 mod real_world_tests;
+mod regression_tests;
 mod table_tests;
 mod text_flow_tests;
+mod verify_tests;
 
 use fop_core::FoTreeBuilder;
 use fop_layout::LayoutEngine;

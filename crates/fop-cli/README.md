@@ -1,15 +1,23 @@
 # FOP CLI - Apache FOP Command-Line Interface
 
-A high-performance command-line tool for converting XSL-FO documents to PDF format.
+[![Crates.io](https://img.shields.io/crates/v/fop-cli.svg)](https://crates.io/crates/fop-cli)
+[![Documentation](https://docs.rs/fop-cli/badge.svg)](https://docs.rs/fop-cli)
+[![License](https://img.shields.io/crates/l/fop-cli.svg)](LICENSE)
+
+A high-performance command-line tool for converting XSL-FO documents to multiple output formats including PDF, SVG, PostScript, PNG, JPEG, and plain text.
+
+Part of the [COOLJAPAN FOP](https://github.com/cool-japan/fop) ecosystem — an Apache FOP-compatible pure-Rust implementation.
 
 ## Features
 
-- **Fast conversion** - Rust-based implementation for optimal performance
-- **Progress reporting** - Real-time progress bars for large documents
-- **Statistics** - Detailed processing metrics and timing information
-- **Validation** - Validate XSL-FO documents without generating output
-- **Flexible options** - Support for custom fonts, images, and PDF metadata
-- **Multiple output formats** - JSON or text-based statistics
+- **Fast conversion** — Rust-based implementation for optimal performance
+- **Multiple output formats** — PDF, SVG, PostScript, PNG, JPEG, and plain text
+- **Progress reporting** — Real-time progress bars for large documents
+- **Statistics** — Detailed processing metrics and timing (text or JSON)
+- **Validation** — Validate XSL-FO documents without generating output
+- **PDF encryption** — Owner/user password protection and permission control
+- **Flexible options** — Support for custom fonts, images, and PDF metadata
+- **Apache FOP-compatible** — Drop-in replacement CLI interface
 
 ## Installation
 
@@ -32,6 +40,28 @@ cp target/release/fop /usr/local/bin/
 
 ```bash
 fop input.fo output.pdf
+```
+
+### Output to Different Formats
+
+```bash
+# PDF (default)
+fop input.fo output.pdf
+
+# SVG
+fop input.fo output.svg
+
+# PostScript
+fop input.fo output.ps
+
+# PNG
+fop input.fo output.png
+
+# JPEG
+fop input.fo output.jpg
+
+# Plain text
+fop input.fo output.txt
 ```
 
 ### With Progress and Statistics
@@ -70,6 +100,23 @@ fop input.fo output.pdf \
     --keywords "fop, pdf, xsl-fo"
 ```
 
+### PDF Encryption
+
+```bash
+# Set owner and user passwords
+fop input.fo output.pdf \
+    -o "owner-secret" \
+    -u "user-secret"
+
+# Restrict permissions
+fop input.fo output.pdf \
+    -o "owner-secret" \
+    --noprint \
+    --nocopy \
+    --noedit \
+    --noannotations
+```
+
 ### Advanced Options
 
 ```bash
@@ -84,44 +131,53 @@ fop input.fo output.pdf \
 
 ### Input/Output
 
-- `<INPUT>` - Input XSL-FO file (required)
-- `[OUTPUT]` - Output PDF file (optional with `--validate-only`)
+- `<INPUT>` — Input XSL-FO file (required)
+- `[OUTPUT]` — Output file (optional with `--validate-only`)
 
 ### Processing Options
 
-- `-v, --verbose` - Enable verbose logging
-- `--stats` - Show detailed statistics after conversion
-- `--validate-only` - Only validate the XSL-FO document
-- `-q, --quiet` - Suppress progress bars and animations
-- `--no-progress` - Disable progress reporting (for scripting)
+- `-v, --verbose` — Enable verbose logging
+- `--stats` — Show detailed statistics after conversion
+- `--validate-only` — Only validate the XSL-FO document
+- `-q, --quiet` — Suppress progress bars and animations
+- `--no-progress` — Disable progress reporting (for scripting)
 
 ### Resources
 
-- `--images-dir <DIR>` - Directory containing images
-- `--font-dir <DIR>` - Directory containing fonts
+- `--images-dir <DIR>` — Directory containing images
+- `--font-dir <DIR>` — Directory containing fonts
 
 ### PDF Options
 
-- `--compress` - Enable PDF compression (reduces file size)
-- `--pdf-version <VERSION>` - PDF version (1.4, 1.5, 1.6, 1.7, 2.0) [default: 1.4]
-- `--author <AUTHOR>` - Set PDF author metadata
-- `--title <TITLE>` - Set PDF title metadata
-- `--subject <SUBJECT>` - Set PDF subject metadata
-- `--keywords <KEYWORDS>` - Set PDF keywords metadata
+- `--compress` — Enable PDF compression (reduces file size)
+- `--pdf-version <VERSION>` — PDF version (1.4, 1.5, 1.6, 1.7, 2.0) [default: 1.4]
+- `--author <AUTHOR>` — Set PDF author metadata
+- `--title <TITLE>` — Set PDF title metadata
+- `--subject <SUBJECT>` — Set PDF subject metadata
+- `--keywords <KEYWORDS>` — Set PDF keywords metadata
+
+### Encryption Options
+
+- `-o, --owner-password <PASSWORD>` — Set PDF owner password (full access)
+- `-u, --user-password <PASSWORD>` — Set PDF user password (restricted access)
+- `--noprint` — Disallow printing
+- `--nocopy` — Disallow copying content
+- `--noedit` — Disallow editing
+- `--noannotations` — Disallow adding annotations
 
 ### Performance
 
-- `-j, --jobs <N>` - Number of threads to use (default: auto-detect)
-- `--max-memory <MB>` - Maximum memory usage in MB
+- `-j, --jobs <N>` — Number of threads to use (default: auto-detect)
+- `--max-memory <MB>` — Maximum memory usage in MB
 
 ### Validation
 
-- `--strict` - Enable strict XSL-FO validation
-- `--fail-fast` - Stop processing after first error
+- `--strict` — Enable strict XSL-FO validation
+- `--fail-fast` — Stop processing after first error
 
 ### Output Format
 
-- `--output-format <FORMAT>` - Output format for validation results (text, json) [default: text]
+- `--output-format <FORMAT>` — Output format for validation results (text, json) [default: text]
 
 ## Examples
 
@@ -172,14 +228,27 @@ fi
 ### Production Deployment
 
 ```bash
-# Compressed PDF with metadata
+# Compressed PDF with metadata and encryption
 fop report.fo report.pdf \
     --compress \
     --pdf-version 1.7 \
     --title "Annual Report 2024" \
     --author "Acme Corporation" \
     --subject "Financial Report" \
-    --keywords "finance, annual, 2024"
+    --keywords "finance, annual, 2024" \
+    -o "owner-secret" \
+    -u "reader-pass" \
+    --noprint --nocopy
+```
+
+### Multi-Format Output
+
+```bash
+# Generate multiple formats from the same source
+fop document.fo document.pdf
+fop document.fo document.svg
+fop document.fo document.ps
+fop document.fo document.txt
 ```
 
 ## Output
@@ -213,11 +282,11 @@ Processing Statistics:
   ⚙️ Parsing:      245ms
   ⚙️ Layout:       1.20s
   ⚙️ Rendering:    890ms
-  ✨Total:        2.35s
+  ✨ Total:        2.35s
 
-  •FO Nodes:     1243
-  •Areas:        3456
-  📄Pages:        42
+  • FO Nodes:     1243
+  • Areas:        3456
+  📄 Pages:        42
 
   Input size:    234.5 KB
   Output size:   1.2 MB
@@ -287,8 +356,8 @@ done
 
 The CLI returns different exit codes:
 
-- `0` - Success
-- `1` - Error (parsing, layout, rendering, or I/O)
+- `0` — Success
+- `1` — Error (parsing, layout, rendering, or I/O)
 
 Errors are printed to stderr with detailed context:
 
@@ -331,12 +400,60 @@ cargo test --package fop-cli
 cargo clippy --package fop-cli -- -D warnings
 ```
 
+## Dependencies
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `fop-core` | workspace | FO tree parsing and processing |
+| `fop-layout` | workspace | Page layout engine |
+| `fop-render` | workspace | Multi-format rendering |
+| `fop-types` | workspace | Shared types and data structures |
+| `clap` | 4.5 | Command-line argument parsing |
+| `anyhow` | 1.0 | Error handling |
+| `indicatif` | 0.18 | Progress bars |
+| `console` | 0.16 | Terminal styling |
+| `humantime` | 2.3 | Human-readable durations |
+| `bytesize` | 2.3 | Human-readable byte sizes |
+| `serde_json` | 1.0 | JSON statistics output |
+| `env_logger` | 0.11 | Logging backend |
+| `log` | 0.4 | Logging facade |
+
+## Related Crates
+
+| Crate | Description |
+|-------|-------------|
+| [`fop-core`](https://crates.io/crates/fop-core) | XSL-FO tree parsing and validation |
+| [`fop-layout`](https://crates.io/crates/fop-layout) | Page layout and area tree generation |
+| [`fop-render`](https://crates.io/crates/fop-render) | Multi-format rendering (PDF, SVG, PS, PNG, JPEG, Text) |
+| [`fop-types`](https://crates.io/crates/fop-types) | Shared FO types, properties, and data structures |
+| [`fop-pdf-renderer`](https://crates.io/crates/fop-pdf-renderer) | Low-level PDF generation with encryption support |
+| [`fop-wasm`](https://crates.io/crates/fop-wasm) | WebAssembly bindings for browser usage |
+| [`fop-python`](https://crates.io/crates/fop-python) | Python bindings via PyO3 |
+
+## See Also
+
+- [FOP Repository](https://github.com/cool-japan/fop) — Main project repository
+- [FOP Core](../fop-core/README.md) — FO tree parsing
+- [FOP Layout](../fop-layout/README.md) — Layout engine
+- [FOP Render](../fop-render/README.md) — Multi-format rendering
+- [FOP Types](../fop-types/README.md) — Shared types
+- [FOP PDF Renderer](../fop-pdf-renderer/README.md) — PDF generation and encryption
+- [CLI Usage Guide](USAGE.md) — Detailed usage documentation
+
 ## License
 
 Apache License 2.0
 
-## See Also
+Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
 
-- [FOP Core](../fop-core/README.md) - FO tree parsing
-- [FOP Layout](../fop-layout/README.md) - Layout engine
-- [FOP Render](../fop-render/README.md) - PDF rendering
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+<http://www.apache.org/licenses/LICENSE-2.0>
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

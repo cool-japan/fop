@@ -22,7 +22,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["COOLJAPAN OU (Team Kitasan)"]
 license = "Apache-2.0"
@@ -59,12 +59,12 @@ fop-pdf-renderer = { workspace = true }
 
 [workspace.dependencies]
 # Internal fop-* crates
-fop-types = { path = "crates/fop-types", version = "0.1.0" }
-fop-core = { path = "crates/fop-core", version = "0.1.0" }
-fop-layout = { path = "crates/fop-layout", version = "0.1.0" }
-fop-render = { path = "crates/fop-render", version = "0.1.0", default-features = false }
-fop-pdf-renderer = { path = "crates/fop-pdf-renderer", version = "0.1.0" }
-fop-cli = { path = "crates/fop-cli", version = "0.1.0" }
+fop-types = { path = "crates/fop-types", version = "0.1.1" }
+fop-core = { path = "crates/fop-core", version = "0.1.1" }
+fop-layout = { path = "crates/fop-layout", version = "0.1.1" }
+fop-render = { path = "crates/fop-render", version = "0.1.1", default-features = false }
+fop-pdf-renderer = { path = "crates/fop-pdf-renderer", version = "0.1.1" }
+fop-cli = { path = "crates/fop-cli", version = "0.1.1" }
 # External dependencies
 thiserror = "2.0"
 log = "0.4"
@@ -72,15 +72,15 @@ quick-xml = { version = "0.39", features = ["serialize"] }
 criterion = "0.8"
 png = "0.18"
 jpeg-decoder = "0.3"
-flate2 = "1.1"
+oxiarc-deflate = "0.2.6"
 ttf-parser = "0.25"
-pyo3 = { version = "0.24", features = ["abi3-py38"] }
+pyo3 = { version = "0.28", features = ["abi3-py38"] }
 env_logger = "0.11"
 tiny-skia = "0.12"
-tempfile = "3.26"
+tempfile = "3.27"
 image = "0.25"
 anyhow = "1.0"
-clap = { version = "4.5", features = ["derive", "cargo"] }
+clap = { version = "4.6", features = ["derive", "cargo"] }
 indicatif = "0.18"
 console = "0.16"
 humantime = "2.3"
@@ -88,16 +88,16 @@ bytesize = "2.3"
 serde_json = "1.0"
 resvg = "0.47"
 usvg = "0.47"
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
-sha2 = "0.10"
-md-5 = "0.10"
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc"] }
+sha2 = "0.11"
+md-5 = "0.11"
 jpeg-encoder = "0.7"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
 wasm-bindgen-test = "0.3"
-assert_cmd = "2.1"
+assert_cmd = "2.2"
 predicates = "3.1"
 
 [[bench]]
@@ -118,6 +118,8 @@ path = "benches/performance_benchmarks.rs"
 [[test]]
 name = "integration"
 path = "tests/integration/mod.rs"
+
+
 
 [profile.release]
 lto = true

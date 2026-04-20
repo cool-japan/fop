@@ -26,3 +26,6 @@ fop-core = { workspace = true }
 fop-layout = { workspace = true }
 fop-render = { workspace = true, default-features = false }
 pyo3 = { workspace = true }
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 /// A content stream token
 #[derive(Debug, Clone)]
-enum Token {
+pub(crate) enum Token {
     Number(f64),
     Name(String),
     StringBytes(Vec<u8>),
@@ -26,17 +26,17 @@ enum Token {
     Operator(String),
 }
 
-struct Tokenizer<'a> {
+pub(crate) struct Tokenizer<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Tokenizer<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
-    fn next_token(&mut self) -> Option<Token> {
+    pub(crate) fn next_token(&mut self) -> Option<Token> {
         self.skip_whitespace_and_comments();
         if self.pos >= self.data.len() {
             return None;
@@ -828,11 +828,17 @@ impl<'a> ContentInterpreter<'a> {
             // Font size in user space
             let font_size = self.text_state.font_size * ctm.a.abs();
 
-            // Get character
-            let character = self
-                .font_cache
-                .get(&font_name)
-                .and_then(|f| f.cid_to_char(cid));
+            // Get character — try ToUnicode CMap first, then fall back to
+            // WinAnsi/Standard encoding for simple (non-composite) fonts.
+            let character = self.font_cache.get(&font_name).and_then(|f| {
+                f.cid_to_char(cid).or_else(|| {
+                    if !is_composite && cid <= 255 {
+                        crate::font::LoadedFont::simple_byte_to_char(f.encoding, cid as u8)
+                    } else {
+                        None
+                    }
+                })
+            });
 
             // Get advance width
             let advance_units = self

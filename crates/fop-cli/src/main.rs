@@ -604,6 +604,45 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
 
+    // Phase 7: Render-verify — re-parse and rasterize the generated PDF as a self-check
+    if cli.render_verify && matches!(output_format, cli::OutputFormat::Pdf) {
+        progress.start_phase("Render-verifying PDF...");
+        let phase_start = Instant::now();
+
+        let dpi = cli.dpi.map(|d| d as f32).unwrap_or(72.0_f32);
+
+        match fop_pdf_renderer::PdfRenderer::from_bytes(&final_bytes) {
+            Ok(renderer) => {
+                let page_count = renderer.page_count();
+                if !cli.is_quiet() {
+                    eprintln!("Render-verify: {} page(s)", page_count);
+                }
+                for i in 0..page_count {
+                    match renderer.render_page(i, dpi) {
+                        Ok(page) => {
+                            if !cli.is_quiet() {
+                                eprintln!("  Page {}: {}x{} px", i + 1, page.width, page.height);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("render-verify: page {} rasterization failed: {}", i, e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                progress.finish_phase(
+                    &format!("Render-verify complete ({} pages)", page_count),
+                    phase_start.elapsed(),
+                );
+            }
+            Err(e) => {
+                eprintln!("render-verify: failed to parse generated PDF: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    // Non-PDF: silently no-op
+
     // Final summary
     stats.total_duration = start_time.elapsed();
 

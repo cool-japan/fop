@@ -24,7 +24,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 png = { workspace = true }
 jpeg-decoder = { workspace = true }
-flate2 = { workspace = true }
+oxiarc-deflate = { workspace = true }
 ttf-parser = { workspace = true }
 resvg = { workspace = true, optional = true }
 usvg = { workspace = true, optional = true }

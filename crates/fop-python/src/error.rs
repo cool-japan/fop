@@ -19,15 +19,6 @@ mod tests {
     use pyo3::prelude::*;
 
     // ------------------------------------------------------------------
-    // Helper: create a Python exception and extract its message string.
-    // pyo3::PyErr can be inspected via its .to_string() in native tests.
-    // ------------------------------------------------------------------
-
-    fn py_err_string(err: pyo3::PyErr) -> String {
-        err.to_string()
-    }
-
-    // ------------------------------------------------------------------
     // fop_error_to_py — currently maps all variants to PyRuntimeError.
     // Tests verify the behaviour of the current implementation plus the
     // Display strings that the Python exception message will carry.
@@ -38,7 +29,7 @@ mod tests {
         use super::fop_error_to_py;
         let err = FopError::ParseError("bad XML".to_string());
         let py_err = fop_error_to_py(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyRuntimeError>(py),
                 "ParseError must map to PyRuntimeError"
@@ -51,7 +42,7 @@ mod tests {
         use super::fop_error_to_py;
         let err = FopError::XmlError("malformed".to_string());
         let py_err = fop_error_to_py(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(py_err.is_instance_of::<PyRuntimeError>(py));
         });
     }
@@ -61,7 +52,7 @@ mod tests {
         use super::fop_error_to_py;
         let err = FopError::Generic("generic failure".to_string());
         let py_err = fop_error_to_py(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(py_err.is_instance_of::<PyRuntimeError>(py));
         });
     }
@@ -72,7 +63,7 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let err = FopError::IoError(io_err);
         let py_err = fop_error_to_py(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(py_err.is_instance_of::<PyRuntimeError>(py));
         });
     }
@@ -82,7 +73,7 @@ mod tests {
         use super::fop_error_to_py;
         let err = FopError::UnknownProperty("color-bleh".to_string());
         let py_err = fop_error_to_py(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(py_err.is_instance_of::<PyRuntimeError>(py));
         });
     }
@@ -92,7 +83,7 @@ mod tests {
         use super::fop_error_to_py;
         let err = FopError::InvalidElement("fo:bogus".to_string());
         let py_err = fop_error_to_py(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(py_err.is_instance_of::<PyRuntimeError>(py));
         });
     }
@@ -105,7 +96,7 @@ mod tests {
             child: "fo:block".to_string(),
         };
         let py_err = fop_error_to_py(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(py_err.is_instance_of::<PyRuntimeError>(py));
         });
     }
@@ -117,7 +108,6 @@ mod tests {
     #[test]
     fn test_fop_error_to_py_preserves_parse_error_message() {
         use super::fop_error_to_py;
-        let msg = "Parse error: unexpected token";
         let err = FopError::ParseError("unexpected token".to_string());
         let display_str = err.to_string();
         let err2 = FopError::ParseError("unexpected token".to_string());
@@ -261,7 +251,7 @@ mod tests {
     #[test]
     fn test_py_runtime_error_direct_creation() {
         let err = PyRuntimeError::new_err("runtime failure");
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(err.is_instance_of::<PyRuntimeError>(py));
         });
     }
@@ -269,7 +259,7 @@ mod tests {
     #[test]
     fn test_py_io_error_direct_creation() {
         let err = PyIOError::new_err("io failure");
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(err.is_instance_of::<PyIOError>(py));
         });
     }
@@ -277,7 +267,7 @@ mod tests {
     #[test]
     fn test_py_value_error_direct_creation() {
         let err = PyValueError::new_err("value failure");
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(err.is_instance_of::<PyValueError>(py));
         });
     }

@@ -3,6 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/fop-pdf-renderer.svg)](https://crates.io/crates/fop-pdf-renderer)
 [![docs.rs](https://docs.rs/fop-pdf-renderer/badge.svg)](https://docs.rs/fop-pdf-renderer)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/cool-japan/fop/blob/main/LICENSE)
+[![Pure Rust](https://img.shields.io/badge/Pure-Rust-orange.svg)](https://www.rust-lang.org/)
 
 A pure Rust PDF-to-image renderer. Parses PDF documents and rasterizes pages to RGBA/PNG images without any C or native dependencies. Designed to complement the `fop-render` crate by enabling self-contained verification of generated PDF output.
 
@@ -20,7 +21,13 @@ A pure Rust PDF-to-image renderer. Parses PDF documents and rasterizes pages to 
 
 ## Installation
 
-Add `fop-pdf-renderer` to your `Cargo.toml`:
+Add `fop-pdf-renderer` to your project:
+
+```bash
+cargo add fop-pdf-renderer
+```
+
+Or add it manually to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -125,8 +132,8 @@ fn main() -> fop_pdf_renderer::Result<()> {
 ```rust
 use fop_pdf_renderer::{PdfRenderer, PdfRenderError};
 
-fn render(path: &str) {
-    let data = std::fs::read(path).expect("could not read file");
+fn render(path: &str) -> fop_pdf_renderer::Result<()> {
+    let data = std::fs::read(path)?;
 
     match PdfRenderer::from_bytes(&data) {
         Err(PdfRenderError::Parse(msg)) => eprintln!("Bad PDF structure: {}", msg),
@@ -138,6 +145,8 @@ fn render(path: &str) {
             println!("Loaded {} pages", renderer.page_count());
         }
     }
+
+    Ok(())
 }
 ```
 
@@ -207,37 +216,82 @@ The tool prints progress to stderr and exits with a non-zero status on error, ma
 
 This crate currently has no optional Cargo feature flags. All capabilities are enabled by default.
 
+## Architecture
+
+The `fop-pdf-renderer` crate is a standalone component within the FOP workspace, with no internal dependencies on `fop-types`, `fop-core`, or `fop-layout`. It can be used independently for any PDF rendering task.
+
+The crate comprises approximately **6,200 lines** across 10 Rust source files (5,040 lines of code), contributing to the FOP workspace total of **15,357 lines**.
+
+Key internal modules:
+
+| Module | Responsibility |
+|---|---|
+| `parser` | PDF cross-reference table/stream parsing, object resolution |
+| `content` | Content stream tokenization and operator interpretation |
+| `filters` | Stream decompression (FlateDecode, DCTDecode, ASCIIHexDecode) |
+| `fonts` | TrueType font extraction, CMap decoding, composite font support |
+| `rasterizer` | Page rasterization via tiny-skia (paths, fills, strokes, images) |
+| `renderer` | High-level `PdfRenderer` API orchestrating parse → render → encode |
+
 ## Integration with fop-render
 
 `fop-pdf-renderer` is designed to work alongside `fop-render`, the XSL-FO to PDF backend in the [fop](https://github.com/cool-japan/fop) workspace. A typical verification workflow is:
 
 ```rust
-// 1. Generate a PDF with fop-render
-let pdf_bytes: Vec<u8> = pdf_doc.to_bytes()?;
+fn verify_pdf(pdf_bytes: &[u8]) -> fop_pdf_renderer::Result<()> {
+    // Render the generated PDF back to an image for visual inspection
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(pdf_bytes)?;
+    let image = renderer.render_page(0, 150.0)?;
+    image.save_png("verification.png")?;
 
-// 2. Immediately render it back to an image for visual inspection
-let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf_bytes)?;
-let image = renderer.render_page(0, 150.0)?;
-image.save_png("verification.png")?;
+    Ok(())
+}
 ```
+
+## Testing
+
+The crate includes a comprehensive test suite with **233 tests**:
+
+```bash
+# Run all tests
+cargo nextest run -p fop-pdf-renderer --all-features
+
+# Or with standard cargo test
+cargo test -p fop-pdf-renderer --all-features
+```
+
+Tests cover PDF parsing, cross-reference resolution, content stream interpretation, stream filter decoding, font handling, rasterization correctness, and end-to-end render-to-PNG pipelines.
 
 ## Dependencies
 
 | Crate | Purpose |
 |---|---|
-| `thiserror` | Derive-based error type definitions |
-| `log` | Structured logging facade |
-| `flate2` | FlateDecode (zlib/deflate) stream decompression |
-| `ttf-parser` | TrueType/OpenType font outline parsing |
-| `png` | PNG encoding |
-| `jpeg-decoder` | DCT/JPEG image decoding |
-| `tiny-skia` | Software 2D rasterizer (paths, fills, strokes, anti-aliasing) |
+| `thiserror` 2.0 | Derive-based error type definitions |
+| `log` 0.4 | Structured logging facade |
+| `flate2` 1.1 | FlateDecode (zlib/deflate) stream decompression |
+| `ttf-parser` 0.25 | TrueType/OpenType font outline parsing |
+| `png` 0.18 | PNG encoding |
+| `jpeg-decoder` 0.3 | DCT/JPEG image decoding |
+| `tiny-skia` 0.12 | Software 2D rasterizer (paths, fills, strokes, anti-aliasing) |
 
 All dependencies are pure Rust with no C or Fortran build dependencies.
 
+## Related Crates
+
+| Crate | Description |
+|---|---|
+| [`fop`](https://crates.io/crates/fop) | Top-level FOP workspace re-export |
+| [`fop-types`](https://crates.io/crates/fop-types) | XSL-FO type definitions and property value types |
+| [`fop-core`](https://crates.io/crates/fop-core) | XSL-FO XML parser and document model |
+| [`fop-layout`](https://crates.io/crates/fop-layout) | Page layout engine (area tree, pagination, breaking) |
+| [`fop-render`](https://crates.io/crates/fop-render) | PDF/PostScript/SVG output backends |
+| [`fop-cli`](https://crates.io/crates/fop-cli) | Command-line interface for the FOP pipeline |
+| [`fop-wasm`](https://crates.io/crates/fop-wasm) | WebAssembly bindings for browser-based rendering |
+| [`fop-python`](https://crates.io/crates/fop-python) | Python bindings via PyO3/Maturin |
+
 ## License
 
-Copyright 2024 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
 
 Licensed under the [Apache License, Version 2.0](https://github.com/cool-japan/fop/blob/main/LICENSE).
 
