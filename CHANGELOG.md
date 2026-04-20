@@ -5,6 +5,37 @@ All notable changes to the Apache FOP Rust implementation will be documented in 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-04-20
+
+### Added
+
+#### PDF Rendering
+- **Glyph Outline Rendering** - Real TrueType/OpenType glyph outlines via `ttf-parser` and `tiny-skia`
+  - `OutlinePathBuilder` converts ttf-parser contours to tiny-skia paths
+  - Standard-14 substitute font discovery with OS-specific directory search and TTC index support
+  - `OnceLock`-based font cache for efficient repeated rendering
+  - Correct Y-flip transform chain for proper glyph orientation
+- **PDF Text Extraction** - `PdfRenderer::extract_text(page_index)` and `extract_all_text()` with ToUnicode CMap decoding
+- **`SimpleDocumentBuilder`** - Lightweight programmatic PDF builder (no FO pipeline required); supports all 14 standard PDF Type 1 fonts
+- **`--render-verify` CLI flag** - Re-parses and rasterizes the generated PDF as a self-verification step; exits non-zero on failure
+
+#### CI / Testing
+- Matrix GitHub Actions CI (Linux / macOS / Windows) with a separate bindings job (maturin + wasm-pack on Ubuntu)
+- Integration test modules `verify_tests` and `regression_tests` now fully wired in; all 17 `.fo` fixtures covered by the auto-verify pipeline
+
+#### Dependencies
+- Replaced `flate2` with `oxiarc-deflate` in `fop-pdf-renderer` and `fop-render` (Pure Rust policy)
+- Added npm publishing workflow for WASM bindings
+
+### Changed
+- **pyo3 upgraded to 0.28** - `Python::with_gil` → `Python::attach` across all `fop-python` tests
+- `fop-python` dev-dependencies now include `pyo3` with `auto-initialize` feature for native test support
+- Refactored formatting and method-chaining style across `fop-cli`, `fop-pdf-renderer`, `fop-render`, and integration tests for improved readability
+
+### Fixed
+- **macOS build fix** - `crates/fop-python/build.rs` emits `-undefined dynamic_lookup` and explicit Python library link args for `cargo test` (without maturin) on macOS
+- `content.rs` correctness fix: `show_string` now falls back to `simple_byte_to_char(encoding, cid as u8)` for non-composite fonts when `cid_to_char(cid)` returns `None`, preventing wrong glyph IDs for standard-14 Helvetica text
+
 ## [0.1.0] - 2026-02-17
 
 ### Added - Phase 1 Complete ✅

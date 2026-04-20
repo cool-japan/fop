@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_convert_to_pdf_invalid_xml_returns_err() {
-        let result = convert_to_pdf("<<<not-xml>>>");
+        let result = convert_to_pdf("<invalid-xml></not-closed>");
         assert!(
             result.is_err(),
             "convert_to_pdf must return Err for invalid XML"
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_convert_to_svg_invalid_xml_returns_err() {
-        let result = convert_to_svg("<<<not-xml>>>");
+        let result = convert_to_svg("<invalid-xml></not-closed>");
         assert!(
             result.is_err(),
             "convert_to_svg must return Err for invalid XML"

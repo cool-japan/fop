@@ -181,4 +181,9 @@ assert!(!image.contains_glyph(".notdef"));
 - [x] Increase test coverage for edge cases in property inheritance (added 14 comprehensive edge case tests covering: explicit inherit keyword, percentages, enums, lists, deep chains, border properties, caching, 4-level inheritance, partial overrides)
 - [x] Add integration tests with real-world XSL-FO documents (4 new tests: invoice, report, form, Unicode)
 - [x] Add fuzzing targets for XML parsing (fuzz_xml_parser and fuzz_property_parser)
-- [x] Update `README.md` with accurate test count, file/LoC statistics, and new feature documentation (`--render-verify` CLI flag, `PdfRenderer::extract_text` API, `fop-pdf-renderer` crate, `fop-render-pdf` binary, `.github/workflows/ci.yml` CI workflow) (planned 2026-04-20)
+- [x] Update `README.md` with accurate test count, file/LoC statistics, and new feature documentation (`--render-verify` CLI flag, `PdfRenderer::extract_text` API, `fop-pdf-renderer` crate, `fop-render-pdf` binary, `.github/workflows/ci.yml` CI workflow) (completed 2026-04-20)
+
+## Version 0.1.1 Fixes and Enhancements (completed 2026-04-20)
+- [x] **PyO3 0.28 migration** — updated `fop-python` to PyO3 0.28 and ported to the new `Python::attach` API (replaces `Python::with_gil`)
+- [x] **macOS build.rs linker fix** — added `build.rs` to `fop-python` to resolve PyO3 ABI3 linker issues on macOS (`-undefined dynamic_lookup` flag)
+- [x] **fop-wasm invalid XML test fixes** — corrected WASM binding error-handling tests to match updated error message format for malformed XML inputs

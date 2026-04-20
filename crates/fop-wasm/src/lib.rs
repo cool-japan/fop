@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_convert_fo_to_pdf_internal_invalid_fo_returns_err() {
-        let result = convert_fo_to_pdf_internal("<<<not xml>>>");
+        let result = convert_fo_to_pdf_internal("<invalid-xml></not-closed>");
         assert!(result.is_err(), "invalid FO must return Err");
     }
 
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_convert_fo_to_svg_internal_invalid_fo_returns_err() {
-        let result = convert_fo_to_svg_internal("<<<not xml>>>");
+        let result = convert_fo_to_svg_internal("<invalid-xml></not-closed>");
         assert!(result.is_err(), "invalid FO must return SVG Err");
     }
 
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_convert_fo_to_text_internal_invalid_fo_returns_err() {
-        let result = convert_fo_to_text_internal("<<<not xml>>>");
+        let result = convert_fo_to_text_internal("<invalid-xml></not-closed>");
         assert!(result.is_err(), "invalid FO must return text Err");
     }
 

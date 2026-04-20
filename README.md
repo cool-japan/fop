@@ -7,7 +7,7 @@
 
 A high-performance, pure Rust reimplementation of [Apache FOP](https://xmlgraphics.apache.org/fop/) (Formatting Objects Processor), translating XSL-FO documents to PDF, SVG, PostScript, raster images, and plain text.
 
-**168 Rust files · 72,373 lines of code · 2,814+ tests · Zero warnings · 10–1200× faster than Java FOP**
+**170 Rust files · 72,872 lines of code · 3,010+ tests · Zero warnings · 10–1200× faster than Java FOP**
 <!-- stats regenerated: 2026-04-20 -->
 
 ## Project Status
@@ -23,7 +23,7 @@ A high-performance, pure Rust reimplementation of [Apache FOP](https://xmlgraphi
 | Phase 5: Advanced Features | ✅ Complete | Image rendering, links, bookmarks, font embedding, i18n, encryption |
 | Phase 6: Optimization | 🔄 85% Complete | Performance (✅), streaming (✅), testing (✅) |
 
-**Current stats:** 2,814+ tests (all passing), 0 compiler warnings, 0 clippy warnings, **10–1200× faster than Java FOP**
+**Current stats:** 3,010+ tests (all passing), 0 compiler warnings, 0 clippy warnings, **10–1200× faster than Java FOP**
 
 ## Key Features
 
@@ -226,7 +226,7 @@ fop/
 │   ├── fop-core/               # FO tree parsing & 294-property system
 │   ├── fop-layout/             # Layout engine (block, inline, table, list, page breaking)
 │   ├── fop-render/             # Rendering backends (PDF, SVG, PostScript, raster, text)
-│   ├── fop-pdf-renderer/       # Pure Rust PDF-to-image renderer (self-verification)
+│   ├── fop-pdf-renderer/       # Pure Rust PDF-to-image renderer (glyph outlines, text extraction, self-verification)
 │   ├── fop-cli/                # CLI tool (fop binary)
 │   ├── fop-wasm/               # WebAssembly bindings (browser / Node.js)
 │   └── fop-python/             # Python bindings via PyO3
@@ -246,7 +246,7 @@ fop-types              (no internal deps)
     │       │
     │       ├── fop-layout   (+ image)
     │       │       │
-    │       │       ├── fop-render   (+ flate2, ttf-parser, png, aes, sha2, md-5,
+    │       │       ├── fop-render   (+ oxiarc-deflate, ttf-parser, png, aes, sha2, md-5,
     │       │       │                   resvg, usvg, jpeg-encoder, tiny-skia)
     │       │       │
     │       │       ├── fop-cli      (+ clap, anyhow, indicatif, console,
@@ -258,7 +258,7 @@ fop-types              (no internal deps)
     │       │
     └───────┘
 
-fop-pdf-renderer       (standalone: thiserror, flate2, ttf-parser, png,
+fop-pdf-renderer       (standalone: thiserror, oxiarc-deflate, ttf-parser, png,
                          jpeg-decoder, tiny-skia)
 ```
 
@@ -317,7 +317,7 @@ All dependencies are **pure Rust** — no C/Fortran/system libraries required.
 | `quick-xml` | 0.39 | XML parsing (zero-copy) |
 | `thiserror` | 2.0 | Error type derivation |
 | `log` | 0.4 | Logging facade |
-| `flate2` | 1.1 | PDF stream compression (deflate) |
+| `oxiarc-deflate` | 0.2.6 | PDF stream compression (deflate) — pure Rust |
 | `ttf-parser` | 0.25 | TrueType/OpenType font parsing |
 | `png` | 0.18 | PNG image encoding/decoding |
 | `jpeg-decoder` | 0.3 | JPEG image decoding |
@@ -347,7 +347,7 @@ All dependencies are **pure Rust** — no C/Fortran/system libraries required.
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `pyo3` | 0.24 | Python bindings (ABI3, Python 3.8+) |
+| `pyo3` | 0.28 | Python bindings (ABI3, Python 3.8+) |
 | `wasm-bindgen` | 0.2 | WebAssembly bindings |
 | `js-sys` | 0.3 | JavaScript interop |
 
@@ -370,7 +370,7 @@ XSL-FO XML ──→ FO Tree ──→ Area Tree ──→ Output (PDF/SVG/PS/PN
 
 ### Testing
 
-- **2,814+ tests** — unit, integration, and fuzz targets
+- **3,010+ tests** — unit, integration, and fuzz targets
 - **Zero warnings** — enforced via `cargo clippy --all-targets -- -D warnings`
 - **Fuzz testing** — `fuzz_xml_parser`, `fuzz_property_parser`, `fuzz_layout`
 - **PDF self-verification** — `fop-pdf-renderer` renders generated PDFs back to compare

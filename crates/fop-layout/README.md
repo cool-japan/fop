@@ -6,7 +6,7 @@
 
 Layout engine for the Apache FOP Rust implementation. Transforms the FO tree (from `fop-core`) into an area tree that can be rendered to PDF or other formats.
 
-**Version:** 0.1.0 | **Release Date:** 2026-02-25
+**Version:** 0.1.1 | **Release Date:** 2026-04-20
 
 ## Pipeline
 

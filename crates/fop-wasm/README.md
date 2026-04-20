@@ -10,7 +10,7 @@ WebAssembly bindings for [FOP](https://github.com/cool-japan/fop) -- a high-perf
 
 **Pure Rust implementation compiled to WebAssembly -- no native dependencies required.**
 
-> **v0.1.0** released on 2026-02-25 -- initial public release with PDF, SVG, and text output support.
+> **v0.1.1** released on 2026-04-20 -- glyph outline rendering (real TrueType/OpenType outlines via ttf-parser), text extraction API (`extract_text`/`extract_all_text`), and auto-verify pipeline improvements.
 
 ---
 
@@ -219,7 +219,7 @@ const pdf1 = fop.convertToPdf(document1);
 const pdf2 = fop.convertToPdf(document2);
 const svg1 = fop.convertToSvg(document3);
 
-console.log(fop.version()); // e.g. "fop-wasm 0.1.0"
+console.log(fop.version()); // e.g. "fop-wasm 0.1.1"
 ```
 
 ### Error Handling
@@ -250,7 +250,7 @@ The primary API surface. Create an instance and call conversion methods on it.
 | `convertToText` | `convertToText(fo_xml: string)` | `string` | Extract plain text from XSL-FO |
 | `validate` | `validate(fo_xml: string)` | `string` | Validate XSL-FO and return JSON result |
 | `setVerbose` | `setVerbose(verbose: boolean)` | `void` | Enable or disable verbose logging |
-| `version` | `version()` | `string` | Get version string (e.g. `"fop-wasm 0.1.0"`) |
+| `version` | `version()` | `string` | Get version string (e.g. `"fop-wasm 0.1.1"`) |
 | `free` | `free()` | `void` | Explicitly free WASM memory (optional; GC handles this) |
 
 ### Standalone Functions

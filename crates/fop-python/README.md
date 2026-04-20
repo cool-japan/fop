@@ -4,7 +4,7 @@
 [![docs.rs](https://docs.rs/fop-python/badge.svg)](https://docs.rs/fop-python)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/cool-japan/fop/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![PyO3](https://img.shields.io/badge/PyO3-0.24-orange.svg)](https://pyo3.rs/)
+[![PyO3](https://img.shields.io/badge/PyO3-0.28-orange.svg)](https://pyo3.rs/)
 
 Python bindings for [FOP](https://github.com/cool-japan/fop) — a high-performance, pure-Rust XSL-FO processor that converts XSL-FO (Extensible Stylesheet Language Formatting Objects) documents to PDF, SVG, and plain text output.
 
@@ -12,7 +12,7 @@ This crate is part of the **COOLJAPAN FOP ecosystem** and is built with [PyO3](h
 
 > **Note:** The PyPI package name is **`fop2`** (install with `pip install fop2`), but you import it as **`import fop`** in Python.
 
-> **v0.1.0** was released on **2026-02-25** — the first public release of fop-python.
+> **v0.1.1** — released **2026-04-20**: upgraded PyO3 to 0.28 (`Python::attach` replaces `Python::with_gil`); added macOS `build.rs` linker fix for `cdylib` targets.
 
 ---
 
@@ -96,7 +96,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fop-python = "0.1.0"
+fop-python = "0.1.1"
 ```
 
 ---
@@ -232,7 +232,7 @@ pdf_bytes = fop.convert_to_pdf(fo_xml)
 svg_string = fop.convert_to_svg(fo_xml)
 
 # Get version
-print(fop.version())  # fop-python 0.1.0
+print(fop.version())  # fop-python 0.1.1
 ```
 
 ### Error handling
@@ -324,7 +324,7 @@ fn main() {
   </fo:page-sequence>
 </fo:root>"#;
 
-    // Returns PyResult<Vec<u8>> — use pyo3::Python::with_gil to call from Rust
+    // Returns PyResult<Vec<u8>> — use pyo3::Python::attach to call from Rust (pyo3 0.28+)
     // For pure Rust usage, prefer the fop-core / fop-render crates directly.
     println!("FopConverter created: {:?}", converter.version());
 }
