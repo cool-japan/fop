@@ -10,25 +10,20 @@ fn main() {
                 println!("cargo:rustc-cdylib-link-arg=-undefined");
                 println!("cargo:rustc-cdylib-link-arg=dynamic_lookup");
             }
-            // Always link Python on macOS so test binaries resolve pyo3 symbols.
-            link_python(false);
+            link_python();
         }
         "linux" => {
-            // --all-features enables extension-module, so is_extension is true even in
-            // workspace test runs.  We must link Python regardless of that flag;
-            // use tests-only link args to keep the cdylib clean for manylinux wheels.
-            // For non-extension rlib/bin builds link Python normally.
-            link_python(is_extension);
+            // Always link Python so workspace test runs resolve pyo3 symbols.
+            // maturin handles manylinux production builds separately and does not
+            // use this build.rs path, so linking Python here is safe.
+            link_python();
         }
         _ => {}
     }
 }
 
 /// Emit Cargo link directives to resolve pyo3 Python symbols.
-///
-/// `tests_only`: when true, use `cargo:rustc-link-arg-tests` so only test
-/// binaries pick up the Python library (leaves the cdylib link clean).
-fn link_python(tests_only: bool) {
+fn link_python() {
     let python = std::env::var("PYO3_PYTHON").unwrap_or_else(|_| "python3".to_string());
 
     let script = concat!(
@@ -84,10 +79,5 @@ fn link_python(tests_only: bool) {
         return;
     }
 
-    if tests_only {
-        // Only link Python into test binaries; cdylib stays clean for manylinux.
-        println!("cargo:rustc-link-arg-tests=-lpython{ldver}");
-    } else {
-        println!("cargo:rustc-link-lib=python{ldver}");
-    }
+    println!("cargo:rustc-link-lib=python{ldver}");
 }
