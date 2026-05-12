@@ -25,6 +25,12 @@ pub struct FoTreeBuilder<'a> {
     foreign_xml_buffer: String,
     /// NodeId of the instream-foreign-object node being built
     foreign_object_node: Option<NodeId>,
+    /// Depth of an active non-FO subtree (e.g. XMP/RDF inside fo:declarations).
+    /// Non-FO start tags bump this; the matching end tags decrement it instead
+    /// of popping the fo: parent stack. Without this counter, every closing
+    /// foreign-namespace tag erroneously pops `current_node`, orphaning later
+    /// fo: nodes like fo:page-sequence.
+    non_fo_depth: usize,
 }
 
 impl<'a> FoTreeBuilder<'a> {
@@ -36,6 +42,7 @@ impl<'a> FoTreeBuilder<'a> {
             foreign_object_depth: 0,
             foreign_xml_buffer: String::new(),
             foreign_object_node: None,
+            non_fo_depth: 0,
         }
     }
 
@@ -113,27 +120,46 @@ impl<'a> FoTreeBuilder<'a> {
                             self.foreign_xml_buffer.push('>');
                             self.foreign_object_depth += 1;
                         }
+                    } else if matches!(event, Event::Start(_)) {
+                        // Non-FO element outside instream-foreign-object — e.g. XMP
+                        // metadata inside fo:declarations. We don't model these in
+                        // the FO tree, but we must track depth so the matching End
+                        // events don't unwind our fo: parent stack.
+                        self.non_fo_depth += 1;
                     }
+                    // Empty non-FO outside foreign-object: nothing to track —
+                    // quick-xml fires no matching End event.
                 }
                 Event::End(_) => {
                     if self.foreign_object_node.is_some() && self.foreign_object_depth == 0 {
                         // This End event closes the fo:instream-foreign-object itself
                         self.finalize_foreign_object();
                     }
-                    self.end_element()?;
+                    if self.non_fo_depth > 0 {
+                        self.non_fo_depth -= 1;
+                    } else {
+                        self.end_element()?;
+                    }
                 }
                 Event::Text(text) => {
-                    let text_content = parser.extract_text(&text)?;
-                    let trimmed = text_content.trim();
-                    if !trimmed.is_empty() {
-                        self.add_text(trimmed)?;
+                    // Ignore text inside a non-FO subtree (e.g. XMP/RDF) — it
+                    // doesn't belong on any fo: node.
+                    if self.non_fo_depth == 0 {
+                        let text_content = parser.extract_text(&text)?;
+                        let trimmed = text_content.trim();
+                        if !trimmed.is_empty() {
+                            self.add_text(trimmed)?;
+                        }
                     }
                 }
                 Event::CData(cdata) => {
-                    // CDATA sections preserve content exactly
-                    let cdata_content = parser.extract_cdata(&cdata)?;
-                    if !cdata_content.is_empty() {
-                        self.add_text(&cdata_content)?;
+                    // Same rationale as Text above.
+                    if self.non_fo_depth == 0 {
+                        // CDATA sections preserve content exactly
+                        let cdata_content = parser.extract_cdata(&cdata)?;
+                        if !cdata_content.is_empty() {
+                            self.add_text(&cdata_content)?;
+                        }
                     }
                 }
                 Event::Eof => break,
@@ -1226,5 +1252,63 @@ mod additional_tests {
         let cursor = Cursor::new(xml);
         let result = FoTreeBuilder::new().parse(cursor);
         assert!(result.is_ok(), "CDATA in block: {:?}", result.err());
+    }
+
+    /// Regression: fo:declarations may contain XMP/RDF metadata in foreign
+    /// namespaces. Their End events must not pop the fo: parent stack —
+    /// previously every closing foreign tag popped `current_node`, so
+    /// fo:page-sequence ended up orphaned (no parent) and the layout engine
+    /// saw zero page sequences.
+    #[test]
+    fn test_parse_declarations_with_xmp_keeps_page_sequence_attached() {
+        let xml = r#"<?xml version="1.0"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+    <fo:layout-master-set>
+        <fo:simple-page-master master-name="A4">
+            <fo:region-body/>
+        </fo:simple-page-master>
+    </fo:layout-master-set>
+    <fo:declarations>
+        <x:xmpmeta xmlns:x="adobe:ns:meta/">
+            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+                <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" rdf:about="">
+                    <dc:title>
+                        <rdf:Alt><rdf:li xml:lang="x-default">Test Invoice</rdf:li></rdf:Alt>
+                    </dc:title>
+                </rdf:Description>
+            </rdf:RDF>
+        </x:xmpmeta>
+    </fo:declarations>
+    <fo:page-sequence master-reference="A4">
+        <fo:flow flow-name="xsl-region-body">
+            <fo:block>Hello.</fo:block>
+        </fo:flow>
+    </fo:page-sequence>
+</fo:root>"#;
+        let cursor = Cursor::new(xml);
+        let arena = FoTreeBuilder::new()
+            .parse(cursor)
+            .expect("XMP inside fo:declarations should parse");
+
+        // fo:page-sequence must be a child of fo:root, not an orphan.
+        let (root_id, _) = arena.root().expect("root present");
+        let root_has_page_sequence = arena
+            .children(root_id)
+            .into_iter()
+            .filter_map(|id| arena.get(id))
+            .any(|n| matches!(n.data, FoNodeData::PageSequence { .. }));
+        assert!(
+            root_has_page_sequence,
+            "fo:page-sequence must be attached to fo:root after \
+             fo:declarations with foreign-namespace children"
+        );
+
+        // No fo: node other than root should be parentless.
+        let root_id_only = arena.root().map(|(rid, _)| rid);
+        let orphans = arena
+            .iter()
+            .filter(|(id, n)| n.parent.is_none() && Some(*id) != root_id_only)
+            .count();
+        assert_eq!(orphans, 0, "no orphaned fo: nodes");
     }
 }
