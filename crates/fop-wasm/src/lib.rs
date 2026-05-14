@@ -207,10 +207,9 @@ mod tests {
     #[test]
     fn test_validate_fo_internal_empty_returns_err_or_zero() {
         let result = validate_fo_internal("");
-        match result {
-            Ok(n) => assert_eq!(n, 0, "empty string should yield 0 nodes if Ok"),
-            Err(_) => {} // expected
-        }
+        if let Ok(n) = result {
+            assert_eq!(n, 0, "empty string should yield 0 nodes if Ok");
+        } // expected: Err case is acceptable
     }
 
     // ------------------------------------------------------------------

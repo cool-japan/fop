@@ -268,6 +268,28 @@ impl PdfDocument {
         }
     }
 
+    /// Retrieve and decode the PDF catalog's `/Metadata` stream, if present.
+    ///
+    /// Returns the raw (decoded) bytes of the XMP metadata stream, or `None`
+    /// if the catalog has no `/Metadata` entry or the referenced stream cannot
+    /// be decoded.
+    pub fn get_metadata_stream(&self) -> Option<Vec<u8>> {
+        // Locate the Catalog object
+        let catalog_num = find_catalog(&self.objects).ok()?;
+        let catalog = match self.objects.get(&catalog_num)? {
+            PdfObject::Dictionary(d) | PdfObject::Stream(d, _) => d,
+            _ => return None,
+        };
+
+        // Follow the /Metadata indirect reference
+        let metadata_ref = catalog.get("Metadata")?;
+        let (meta_num, _) = metadata_ref.as_reference()?;
+
+        // Decode the stream (XMP is plain UTF-8, no filter in standard PDFs,
+        // but decode_stream handles FlateDecode etc. transparently)
+        self.decode_stream(meta_num).ok()
+    }
+
     /// Look up a font resource by name
     pub fn get_font(&self, resources: &PdfDictionary, name: &str) -> Option<PdfDictionary> {
         let fonts = resources.get("Font")?;

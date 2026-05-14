@@ -338,3 +338,134 @@ fn regression_extracted_text_roundtrips() {
         text
     );
 }
+
+/// Regression test: XMP metadata from `<fo:declarations>` round-trips through
+/// the PDF pipeline.  The XMP packet captured in `fop-core` must appear in the
+/// PDF's `/Metadata` stream, and Dublin Core fields must sync to the /Info dict.
+#[test]
+fn test_issue_1_xmp_metadata_roundtrip() {
+    let fo_input = r##"<?xml version="1.0" encoding="utf-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-width="210mm" page-height="297mm">
+      <fo:region-body margin="2cm"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:declarations>
+    <x:xmpmeta xmlns:x="adobe:ns:meta/">
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" rdf:about="">
+          <dc:title>
+            <rdf:Alt><rdf:li xml:lang="x-default">Test Invoice</rdf:li></rdf:Alt>
+          </dc:title>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>
+  </fo:declarations>
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block font-family="Helvetica" font-size="12pt">Hello.</fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>"##;
+
+    let pdf = super::process_fo_document(fo_input)
+        .expect("FO with fo:declarations + XMP metadata should generate a valid PDF");
+
+    // Verify the PDF is well-formed
+    super::validate_pdf_bytes(&pdf);
+
+    // Verify page count via the PDF renderer
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
+        .expect("PDF should be parseable by fop-pdf-renderer");
+    assert_eq!(
+        renderer.page_count(),
+        1,
+        "fo:declarations with XMP metadata must produce exactly 1 page, got {}",
+        renderer.page_count()
+    );
+
+    // Verify page has renderable content
+    let page = renderer
+        .render_page(0, 72.0)
+        .expect("First page should rasterize successfully");
+    assert!(
+        page.width > 0 && page.height > 0,
+        "Rasterized page should have non-zero dimensions"
+    );
+
+    // Verify that text extraction still works (XMP capture must not silently break content)
+    let text = renderer
+        .extract_text(0)
+        .expect("Text extraction should succeed on page 0");
+    assert!(
+        text.contains("Hello."),
+        "Page text should contain 'Hello.' but got: {:?}",
+        text
+    );
+
+    // Verify the XMP metadata packet was embedded in the PDF
+    let xmp = renderer
+        .extract_xmp_metadata()
+        .expect("PDF should have an embedded XMP metadata stream");
+
+    assert!(
+        xmp.contains("xmpmeta"),
+        "XMP stream should contain the xmpmeta element: {}",
+        xmp
+    );
+    assert!(
+        xmp.contains("Test Invoice"),
+        "XMP stream should contain the dc:title value 'Test Invoice' but got: {}",
+        xmp
+    );
+}
+
+/// Regression test for GitHub issue #1:
+/// `<fo:declarations>` with an `<x:xmpmeta>` XMP block silently produced a
+/// zero-page PDF because the non-FO close tags were incorrectly calling
+/// `end_element()`, walking `current_node` up the parent chain before
+/// `<fo:page-sequence>` was processed, leaving it orphaned in the arena.
+#[test]
+fn test_issue_1_declarations_xmpmeta_zero_pages() {
+    let fo_input = r##"<?xml version="1.0" encoding="utf-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-width="210mm" page-height="297mm">
+      <fo:region-body margin="2cm"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:declarations>
+    <x:xmpmeta xmlns:x="adobe:ns:meta/">
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" rdf:about="">
+          <dc:title>
+            <rdf:Alt><rdf:li xml:lang="x-default">Test Invoice</rdf:li></rdf:Alt>
+          </dc:title>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>
+  </fo:declarations>
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block>Hello.</fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>"##;
+
+    let pdf = super::process_fo_document(fo_input)
+        .expect("FO with fo:declarations + XMP metadata should generate a valid PDF");
+
+    // Verify the PDF is a real document, not an empty placeholder
+    super::validate_pdf_bytes(&pdf);
+
+    // Verify the page count via the PDF renderer
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
+        .expect("PDF should be parseable by fop-pdf-renderer");
+    assert_eq!(
+        renderer.page_count(),
+        1,
+        "fo:declarations with XMP metadata must produce exactly 1 page, got {}",
+        renderer.page_count()
+    );
+}

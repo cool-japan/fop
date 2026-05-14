@@ -14,7 +14,9 @@ pub use types::{
 
 use fop_types::{FopError, Gradient, Result};
 
-use crate::pdf::compliance::{generate_xmp_metadata, PdfCompliance, SRGB_ICC_PROFILE};
+use crate::pdf::compliance::{
+    generate_xmp_metadata, reconcile_xmp, PdfCompliance, SRGB_ICC_PROFILE,
+};
 use crate::pdf::image::ImageXObject;
 use crate::pdf::security::EncryptionDict;
 
@@ -37,7 +39,16 @@ impl PdfDocument {
             encryption: None,
             file_id: None,
             compliance: PdfCompliance::Standard,
+            xmp_metadata: None,
         }
+    }
+
+    /// Set a raw XMP metadata packet to embed in the PDF catalog `/Metadata` stream.
+    ///
+    /// The packet will be reconciled (wrapped in `<?xpacket ...?>` if absent and
+    /// compliance identifiers spliced in) during `to_bytes()`.
+    pub fn set_xmp_metadata(&mut self, xmp: String) {
+        self.xmp_metadata = Some(xmp);
     }
 
     /// Set the PDF compliance mode
@@ -192,8 +203,11 @@ impl PdfDocument {
         // Compliance objects follow immediately after the encryption dict slot
         let compliance_base_id = encrypt_obj_id + encrypt_obj_count;
         let needs_compliance = self.compliance != PdfCompliance::Standard;
-        let xmp_obj_count = if needs_compliance { 1 } else { 0 };
-        let xmp_obj_id = compliance_base_id; // only valid when needs_compliance
+        // needs_xmp is true whenever we have a user-supplied XMP packet OR a non-standard
+        // compliance mode (PDF/A-1b or PDF/UA-1 both require an /Metadata stream).
+        let needs_xmp = needs_compliance || self.xmp_metadata.is_some();
+        let xmp_obj_count = if needs_xmp { 1 } else { 0 };
+        let xmp_obj_id = compliance_base_id; // only valid when needs_xmp
         let oi_obj_count = if self.compliance.requires_pdfa() {
             2
         } else {
@@ -223,8 +237,8 @@ impl PdfDocument {
             bytes.extend_from_slice(b"/Outlines 4 0 R\n");
         }
 
-        // PDF/A and PDF/UA catalog entries
-        if needs_compliance {
+        // PDF/A, PDF/UA, and user-XMP catalog entries
+        if needs_xmp {
             bytes.extend_from_slice(format!("/Metadata {} 0 R\n", xmp_obj_id).as_bytes());
         }
 
@@ -309,12 +323,17 @@ impl PdfDocument {
             bytes.extend_from_slice(enc_dict_str.as_bytes());
         }
 
-        // Generate compliance objects (PDF/A-1b and/or PDF/UA-1)
-        if needs_compliance {
-            // XMP metadata stream (required by both PDF/A and PDF/UA)
-            let title_ref = self.info.title.as_deref();
-            let creator_tool = format!("fop-rs {}", env!("CARGO_PKG_VERSION"));
-            let xmp_content = generate_xmp_metadata(title_ref, &creator_tool, self.compliance);
+        // Generate XMP metadata stream (for compliance modes and/or user-supplied XMP)
+        if needs_xmp {
+            let xmp_content = if let Some(ref raw_xmp) = self.xmp_metadata {
+                // User-supplied packet: reconcile (wrap in <?xpacket?>, splice compliance IDs)
+                reconcile_xmp(raw_xmp, self.compliance)
+            } else {
+                // Compliance-only mode: generate a default XMP packet
+                let title_ref = self.info.title.as_deref();
+                let creator_tool = format!("fop-rs {}", env!("CARGO_PKG_VERSION"));
+                generate_xmp_metadata(title_ref, &creator_tool, self.compliance)
+            };
             let xmp_bytes = xmp_content.as_bytes();
             xref_offsets.push(bytes.len());
             bytes.extend_from_slice(format!("{} 0 obj\n", xmp_obj_id).as_bytes());

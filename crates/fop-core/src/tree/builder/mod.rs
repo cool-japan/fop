@@ -25,6 +25,16 @@ pub struct FoTreeBuilder<'a> {
     foreign_xml_buffer: String,
     /// NodeId of the instream-foreign-object node being built
     foreign_object_node: Option<NodeId>,
+    /// Nesting depth of non-FO elements outside fo:instream-foreign-object.
+    /// Tracks open tags so their matching close tags do not call end_element()
+    /// and corrupt the current_node pointer.  For example, children of
+    /// fo:declarations (e.g. x:xmpmeta / rdf:RDF) live here.
+    non_fo_depth: usize,
+    /// When non-None, we are inside an `<x:xmpmeta>` element and accumulating
+    /// the raw XML (including the root `<x:xmpmeta ...>` opening tag) into this
+    /// buffer.  The depth counter tracks nested open/close pairs so we know
+    /// when the root `</x:xmpmeta>` is reached.
+    xmp_buffer: Option<(String, usize)>,
 }
 
 impl<'a> FoTreeBuilder<'a> {
@@ -36,6 +46,8 @@ impl<'a> FoTreeBuilder<'a> {
             foreign_object_depth: 0,
             foreign_xml_buffer: String::new(),
             foreign_object_node: None,
+            non_fo_depth: 0,
+            xmp_buffer: None,
         }
     }
 
@@ -45,6 +57,71 @@ impl<'a> FoTreeBuilder<'a> {
 
         loop {
             let event = parser.read_event()?;
+
+            // If we are accumulating an <x:xmpmeta> block, capture raw XML until
+            // the matching closing </x:xmpmeta> tag is seen.
+            if self.xmp_buffer.is_some() {
+                match &event {
+                    Event::Start(start) => {
+                        let raw = std::str::from_utf8(start.as_ref())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some((buf, depth)) = &mut self.xmp_buffer {
+                            buf.push('<');
+                            buf.push_str(&raw);
+                            buf.push('>');
+                            *depth += 1;
+                        }
+                    }
+                    Event::Empty(start) => {
+                        let raw = std::str::from_utf8(start.as_ref())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some((buf, _)) = &mut self.xmp_buffer {
+                            buf.push('<');
+                            buf.push_str(&raw);
+                            buf.push_str("/>");
+                        }
+                    }
+                    Event::End(end) => {
+                        let raw = std::str::from_utf8(end.as_ref())
+                            .unwrap_or("")
+                            .to_string();
+                        let depth = self.xmp_buffer.as_ref().map(|(_, d)| *d).unwrap_or(0);
+                        if depth > 0 {
+                            if let Some((buf, d)) = &mut self.xmp_buffer {
+                                buf.push_str("</");
+                                buf.push_str(&raw);
+                                buf.push('>');
+                                *d -= 1;
+                            }
+                        } else {
+                            // Depth == 0: this End event closes the root <x:xmpmeta>
+                            if let Some((mut buf, _)) = self.xmp_buffer.take() {
+                                buf.push_str("</");
+                                buf.push_str(&raw);
+                                buf.push('>');
+                                self.arena.xmp_packets.push(buf);
+                            }
+                            // Restore non_fo_depth: the xmpmeta open tag was counted
+                            // as a non-FO depth increment; now we need to decrement it.
+                            if self.non_fo_depth > 0 {
+                                self.non_fo_depth -= 1;
+                            }
+                        }
+                        continue;
+                    }
+                    Event::Text(text) => {
+                        let text_content = parser.extract_text(text).unwrap_or_default();
+                        if let Some((buf, _)) = &mut self.xmp_buffer {
+                            buf.push_str(&text_content);
+                        }
+                    }
+                    Event::Eof => break,
+                    _ => {}
+                }
+                continue;
+            }
 
             // If we are inside a foreign object child element, capture raw XML
             if self.foreign_object_depth > 0 {
@@ -113,12 +190,59 @@ impl<'a> FoTreeBuilder<'a> {
                             self.foreign_xml_buffer.push('>');
                             self.foreign_object_depth += 1;
                         }
+                    } else {
+                        // Non-FO element outside fo:instream-foreign-object (e.g. x:xmpmeta
+                        // children inside fo:declarations).  Track open/close depth so that
+                        // the matching End events do NOT pop current_node via end_element().
+                        // Empty elements contribute zero net depth.
+                        if matches!(event, Event::Start(_)) {
+                            self.non_fo_depth += 1;
+
+                            // Detect <x:xmpmeta> as a direct child of fo:declarations and
+                            // begin capturing the full element as a raw XMP packet.
+                            let is_declarations_parent = self
+                                .current_node
+                                .and_then(|id| self.arena.get(id))
+                                .map(|n| matches!(n.data, FoNodeData::Declarations))
+                                .unwrap_or(false);
+
+                            if is_declarations_parent {
+                                let raw = std::str::from_utf8(start.as_ref())
+                                    .unwrap_or("")
+                                    .to_string();
+                                // Check for xmpmeta (local-name only, after any prefix colon)
+                                let local_name = raw
+                                    .split_once(':')
+                                    .map(|(_, local)| local)
+                                    .unwrap_or(raw.as_str());
+                                // local_name may have attributes after the element name
+                                let local_tag = local_name
+                                    .split_once(|c: char| c.is_ascii_whitespace())
+                                    .map(|(tag, _)| tag)
+                                    .unwrap_or(local_name);
+                                if local_tag == "xmpmeta" {
+                                    let mut buf = String::new();
+                                    buf.push('<');
+                                    buf.push_str(&raw);
+                                    buf.push('>');
+                                    // depth=0 means we're inside the root xmpmeta tag
+                                    self.xmp_buffer = Some((buf, 0));
+                                }
+                            }
+                        }
+                        // Event::Empty: no push, no pop — just ignore.
                     }
                 }
                 Event::End(_) => {
                     if self.foreign_object_node.is_some() && self.foreign_object_depth == 0 {
                         // This End event closes the fo:instream-foreign-object itself
                         self.finalize_foreign_object();
+                    }
+                    // If we are inside a non-FO subtree, consume the close tag without
+                    // touching current_node.
+                    if self.non_fo_depth > 0 {
+                        self.non_fo_depth -= 1;
+                        continue;
                     }
                     self.end_element()?;
                 }
@@ -1226,5 +1350,67 @@ mod additional_tests {
         let cursor = Cursor::new(xml);
         let result = FoTreeBuilder::new().parse(cursor);
         assert!(result.is_ok(), "CDATA in block: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_xmp_packet_captured_from_declarations() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-width="210mm" page-height="297mm">
+      <fo:region-body margin="2cm"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:declarations>
+    <x:xmpmeta xmlns:x="adobe:ns:meta/">
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" rdf:about="">
+          <dc:title>
+            <rdf:Alt><rdf:li xml:lang="x-default">Test Invoice</rdf:li></rdf:Alt>
+          </dc:title>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>
+  </fo:declarations>
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block>Hello.</fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>"##;
+
+        let cursor = Cursor::new(xml);
+        let arena = FoTreeBuilder::new()
+            .parse(cursor)
+            .expect("FO with fo:declarations + XMP metadata should parse successfully");
+
+        // Verify the XMP packet was captured
+        assert_eq!(
+            arena.xmp_packets.len(),
+            1,
+            "Should have exactly one XMP packet captured from fo:declarations"
+        );
+
+        let packet = &arena.xmp_packets[0];
+        assert!(
+            packet.contains("xmpmeta"),
+            "XMP packet should contain the xmpmeta element: {}",
+            packet
+        );
+        assert!(
+            packet.contains("Test Invoice"),
+            "XMP packet should contain the dc:title value: {}",
+            packet
+        );
+
+        // Verify the document also has the correct page-sequence structure
+        let page_seq_count = arena
+            .iter()
+            .filter(|(_, n)| matches!(n.data, FoNodeData::PageSequence { .. }))
+            .count();
+        assert_eq!(
+            page_seq_count, 1,
+            "Document should have exactly one page-sequence"
+        );
     }
 }

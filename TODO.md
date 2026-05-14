@@ -187,3 +187,45 @@ assert!(!image.contains_glyph(".notdef"));
 - [x] **PyO3 0.28 migration** — updated `fop-python` to PyO3 0.28 and ported to the new `Python::attach` API (replaces `Python::with_gil`)
 - [x] **macOS build.rs linker fix** — added `build.rs` to `fop-python` to resolve PyO3 ABI3 linker issues on macOS (`-undefined dynamic_lookup` flag)
 - [x] **fop-wasm invalid XML test fixes** — corrected WASM binding error-handling tests to match updated error message format for malformed XML inputs
+
+## XMP Metadata Embedding (Issue #1 follow-up)
+
+- [x] XMP metadata embedding — capture `<x:xmpmeta>` from `fo:declarations`, write the PDF `/Metadata` stream, and sync the `/Info` dictionary (issue #1 follow-up) (completed 2026-05-14)
+  - **Goal:** An FO document whose `<fo:declarations>` contains an `<x:xmpmeta>` RDF/XML packet produces a PDF in which (a) the catalog has a `/Metadata N 0 R` reference, (b) object N is a `/Type /Metadata /Subtype /XML` stream containing the source XMP packet (xpacket-wrapped), and (c) the `/Info` dictionary's `/Title`, `/Author`, `/Subject` are auto-populated from the packet's Dublin Core fields. The issue #1 reporter's exact FO round-trips: `extract_xmp_metadata()` returns the packet, `extract_text()` still returns "Hello.", `page_count() == 1`.
+  - **Design:**
+    - **Phase A — capture (`fop-core`).**
+      - `arena.rs`: add `pub xmp_packets: Vec<String>` to `FoArena`, initialised in both `new()` and `with_capacity()`. *`Vec` (not `Option`) chosen consciously:* the builder's event loop just `push`es as it finalises each packet — no "already captured?" guard in the hot path — and the consumer takes `.first()`. Captures all, uses first; honest, and preserves info for a future multi-packet decision.
+      - `builder/mod.rs`: extend the existing non-FO branch (the issue #1 `non_fo_depth` machinery). Add field `xmp_buffer: Option<String>`. When a non-FO `Event::Start` arrives with `non_fo_depth == 0`, `current_node` is a `FoNodeData::Declarations`, and the element local-name is `xmpmeta`: start a buffer. While `xmp_buffer.is_some()`, reconstruct **every** non-FO `Start`/`Empty`/`End`/`Text`/`CData` event into the buffer. When the matching `End` brings `non_fo_depth` back to 0, push the buffer to `arena.xmp_packets`. Check `foreign_object_node` first, then `xmp_buffer`, then the plain `non_fo_depth` skip — mutually exclusive in practice.
+    - **Phase B — write `/Metadata` stream (`fop-render`).**
+      - `document/types.rs`: add `pub xmp_metadata: Option<String>` to `PdfDocument`; init `None` in `new()`.
+      - `document/mod.rs`: add `set_xmp_metadata(&mut self, xmp: String)`. In `to_bytes()`: compute `let needs_xmp = needs_compliance || self.xmp_metadata.is_some();`. Change xmp_obj_count gate, catalog ref, and stream-emit block to use `needs_xmp`. Stream content: `match &self.xmp_metadata { Some(src) => reconcile_xmp(src, self.compliance), None => generate_xmp_metadata(...) }`.
+      - `compliance.rs`: add `reconcile_xmp(source: &str, compliance: PdfCompliance) -> String` and `extract_dc_fields(xmp: &str) -> DcFields`.
+    - **Phase B.5 — sync `/Info` from Dublin Core (`fop-render`).** Bridge `fo_tree.xmp_packets.first()` → `doc.set_xmp_metadata(...)` in `render_with_fo()`, then fill any unset `doc.info.title/author/subject` from `extract_dc_fields`. Do not overwrite values already set.
+    - **Phase C — extract + round-trip (`fop-pdf-renderer`).**
+      - `parser.rs`: add `pub fn get_metadata_stream(&self) -> Option<Vec<u8>>` — `find_catalog` → catalog `/Metadata` ref → `decode_stream(obj_num)`.
+      - `lib.rs`: add `pub fn extract_xmp_metadata(&self) -> Option<String>` delegating to it via `String::from_utf8(...).ok()`.
+  - **Files:**
+    - `crates/fop-core/src/tree/arena.rs` — `xmp_packets` field
+    - `crates/fop-core/src/tree/builder/mod.rs` — capture logic in the non-FO branch
+    - `crates/fop-render/src/pdf/document/types.rs` — `PdfDocument.xmp_metadata` field
+    - `crates/fop-render/src/pdf/document/mod.rs` — `set_xmp_metadata()`, `to_bytes()` ID chain + catalog ref + stream emit
+    - `crates/fop-render/src/pdf/compliance.rs` — `reconcile_xmp()`, `extract_dc_fields()`
+    - `crates/fop-render/src/pdf/writer.rs` — `render_with_fo()` bridge + `/Info` sync
+    - `crates/fop-pdf-renderer/src/parser.rs` — `get_metadata_stream()`
+    - `crates/fop-pdf-renderer/src/lib.rs` — `extract_xmp_metadata()`
+    - `tests/integration/regression_tests.rs` — round-trip regression test
+    - `TODO.md` (root) — this plan block; `crates/fop-core/TODO.md` + `crates/fop-render/TODO.md` — one-line back-reference
+  - **Prerequisites:** none external. Phases are strictly sequential within one subagent.
+  - **Tests:**
+    - `fop-core` unit: `test_xmp_packet_captured_from_declarations`
+    - `fop-render` unit: `test_pdf_document_writes_metadata_stream`, `test_reconcile_xmp_standard_wraps_xpacket`, `test_reconcile_xmp_pdfa_splices_identifiers`, `test_extract_dc_fields`
+    - integration: `test_issue_1_xmp_metadata_roundtrip`
+    - Full workspace: `cargo nextest run --all-features` — 2828+ tests green; clippy clean.
+  - **Risk:**
+    - Object-ID chain fragility: switching xmp gate from `needs_compliance` to `needs_xmp` shifts later IDs. Mitigation: pdf-renderer parses via xref (renumber-robust); full regression test suite catches off-by-one.
+    - Namespace self-containment assumption: XMP subtree must declare its own xmlns prefixes.
+
+## Proposed follow-ups
+
+- [ ] `SimpleDocumentBuilder` (`fop-render/src/pdf/simple.rs`) XMP support — scoped out of the issue #1 follow-up; defer until an audit-log-XMP requirement exists.
+- [ ] XMP namespace-inheritance hardening — capture currently assumes the `<x:xmpmeta>` subtree declares its own `xmlns:` prefixes; a robust fix would snapshot the active namespace map.
