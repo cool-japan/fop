@@ -228,4 +228,43 @@ assert!(!image.contains_glyph(".notdef"));
 ## Proposed follow-ups
 
 - [ ] `SimpleDocumentBuilder` (`fop-render/src/pdf/simple.rs`) XMP support — scoped out of the issue #1 follow-up; defer until an audit-log-XMP requirement exists.
-- [ ] XMP namespace-inheritance hardening — capture currently assumes the `<x:xmpmeta>` subtree declares its own `xmlns:` prefixes; a robust fix would snapshot the active namespace map.
+- [x] XMP namespace-inheritance hardening — proper namespace scope stack in `XmlParser`; capture-time injection of *only the in-scope `xmlns:` prefixes actually used by the subtree* into the captured root open tag; same fix applied to `instream-foreign-object` capture; round-trip `Event::CData` / `Event::Comment` in both capture buffers (planned 2026-05-15)
+  - **Goal:** When an FO document declares `xmlns:x`, `xmlns:rdf`, `xmlns:dc` on `<fo:root>` (the standard XSL-FO authoring style) and then writes `<x:xmpmeta>…</x:xmpmeta>` inside `<fo:declarations>` without redeclaring those prefixes locally, the captured packet stored in `FoArena.xmp_packets[0]` is **standalone-well-formed RDF/XML** (no undefined prefixes, parseable by a strict namespace-aware reader, all in-scope `xmlns:` decls that the subtree actually references appear on the captured `<x:xmpmeta>` root element verbatim). The same guarantee holds for `instream-foreign-object` (SVG inside `fo:instream-foreign-object` survives ancestor `xmlns:svg`). CData sections and comments inside either capture round-trip byte-for-byte. The PDF `/Metadata` stream a user gets from `extract_xmp_metadata()` is therefore parseable by any conforming RDF/XML reader. No regression in the 3024 existing tests.
+  - **Design:**
+    - **Phase 1 — proper namespace scope stack (`fop-core/src/xml/parser.rs`).**
+      - Replace `namespace_map: HashMap<String, String>` with `namespace_stack: Vec<NamespaceScope>` where `NamespaceScope { decls: Vec<(String, String)> }` (prefix, uri pairs declared on one element's open tag). Always push (even an empty frame) so pop is symmetric.
+      - Add `push_namespace_scope(&mut self, start: &BytesStart)` — parse `xmlns`/`xmlns:*` attrs, push new scope.
+      - Add `pop_namespace_scope(&mut self)` — soft pop (no panic on underflow).
+      - Add `resolve_prefix(&self, prefix: &str) -> Option<&str>` — scan stack top-down, return first match.
+      - Add `snapshot_in_scope(&self) -> Vec<(String, String)>` — fold bottom-up (innermost wins), sort by prefix, return owned Vec.
+      - Update `extract_name()` to use `resolve_prefix` instead of `namespace_map.get`.
+      - Delete `update_namespaces()` — replaced by loop-top push in the builder.
+    - **Phase 2 — push/pop integration in the builder (`fop-core/src/tree/builder/mod.rs`).**
+      - At the very top of the parse loop: on `Event::Start` push before dispatch; on `Event::End` pop after dispatch; on `Event::Empty` push+dispatch+pop.
+      - Remove the three legacy `parser.update_namespaces(start)` calls (Phase 1 deletes the method so these would fail to compile anyway).
+    - **Phase 3 — capture-time prefix tracking + injection (`builder/mod.rs` + new `builder/xmlns.rs`).**
+      - New file `xmlns.rs` (~120 lines): pure helpers `extract_prefix`, `scan_prefixes_used`, `declared_on_element`, `render_xmlns_attrs`, `inject_namespace_decls`. Each has unit tests.
+      - Promote `xmp_buffer: Option<(String, usize)>` to `xmp_buffer: Option<CaptureNs>` with fields: `buffer`, `depth`, `root_close_byte`, `in_scope_at_start`, `declared_on_root`, `used_in_subtree`. Parallel `foreign_object_capture: Option<CaptureNs>`.
+      - Capture-start: record root open tag bytes, `root_close_byte`, snapshot in-scope namespaces, declare-on-root set, seed used-prefixes.
+      - Capture-body: add `Event::CData` and `Event::Comment` handling (previously dropped via `_ => {}`); update `used_in_subtree` on every Start/Empty.
+      - Capture-finalise: compute `to_inject = used − declared_on_root`, look up URIs from `in_scope_at_start`, splice via `inject_namespace_decls` at `root_close_byte`, push patched packet.
+    - **Phase 4 — tests.**
+      - `test_xmp_namespace_inheritance_captures_inherited_xmlns` — `xmlns:x/rdf/dc` on `<fo:root>` only; assert injected on captured root.
+      - `test_xmp_well_formed_via_ns_reader` — feed captured packet to `quick_xml::NsReader`; any `ResolveResult::Unknown` fails.
+      - `test_namespace_scope_pop_restores_outer` and `test_namespace_scope_sibling_rebind_does_not_leak` (parser unit).
+      - `test_foreign_object_inherits_xmlns_svg` — SVG with inherited `xmlns:svg`.
+      - `test_xmp_capture_round_trips_cdata` and `test_xmp_capture_round_trips_comment`.
+      - `test_xmlns_inject_self_closing_root` (xmlns helper unit).
+      - `test_issue_1_namespace_inheritance_pdf_roundtrip` (integration).
+  - **Files:**
+    - `crates/fop-core/src/xml/parser.rs` — `NamespaceScope` struct; replace `namespace_map`; new scope methods; update `extract_name`; delete `update_namespaces`.
+    - `crates/fop-core/src/tree/builder/mod.rs` — loop-top push/pop; remove 3 legacy calls; promote capture state to `CaptureNs`; CData/Comment append; finalize injection.
+    - `crates/fop-core/src/tree/builder/xmlns.rs` (NEW) — pure helpers + unit tests.
+    - `crates/fop-core/src/tree/builder.rs` or `mod.rs` — `mod xmlns;` line.
+    - `tests/integration/regression_tests.rs` — `test_issue_1_namespace_inheritance_pdf_roundtrip`.
+  - **Tests:** see Phase 4. Acceptance: `test_xmp_well_formed_via_ns_reader` passes for the inherited-xmlns shape; 3024 existing tests stay green.
+  - **Risk:**
+    - *Behavioural change in `extract_name`.* Strictly lexical scope now — correctness improvement but a test accidentally relying on the old leak would fail. Full 3024-test sweep is the mitigation.
+    - *Push/pop symmetry.* `expand_empty_elements=true` should make `Event::Empty` unreachable; guard it defensively anyway.
+    - *Capture-start timing.* Push happens loop-top before dispatch, so the root's own `xmlns:` decls are already on the stack when snapshot is taken at capture-start.
+    - *Sibling-prefix-rebinding leak.* Old flat `namespace_map` silently mutated; `test_namespace_scope_sibling_rebind_does_not_leak` is the new guard.

@@ -35,4 +35,4 @@
 
 ## XMP Metadata Embedding
 
-- [~] See root `TODO.md` → **XMP Metadata Embedding (Issue #1 follow-up)** for the full plan (Phase B: `document/`, `compliance.rs`, `writer.rs`).
+- [x] See root `TODO.md` → **XMP Metadata Embedding (Issue #1 follow-up)** for the full plan (Phase B: `document/`, `compliance.rs`, `writer.rs`).

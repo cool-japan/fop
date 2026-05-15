@@ -469,3 +469,93 @@ fn test_issue_1_declarations_xmpmeta_zero_pages() {
         renderer.page_count()
     );
 }
+
+/// Regression test: xmlns:x / xmlns:rdf / xmlns:dc declared on `<fo:root>` (not on
+/// `<x:xmpmeta>`) must produce a standalone-well-formed XMP packet in the PDF
+/// `/Metadata` stream — no undefined namespace prefixes.
+#[test]
+fn test_issue_1_namespace_inheritance_pdf_roundtrip() {
+    let fo_bytes = br#"<?xml version="1.0" encoding="UTF-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format"
+         xmlns:x="adobe:ns:meta/"
+         xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-height="297mm" page-width="210mm"
+                           margin-top="20mm" margin-bottom="20mm"
+                           margin-left="20mm" margin-right="20mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:declarations>
+    <x:xmpmeta>
+      <rdf:RDF>
+        <rdf:Description rdf:about="">
+          <dc:title>
+            <rdf:Alt><rdf:li xml:lang="x-default">Test Invoice</rdf:li></rdf:Alt>
+          </dc:title>
+          <dc:creator><rdf:Bag><rdf:li>Test Author</rdf:li></rdf:Bag></dc:creator>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>
+  </fo:declarations>
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block>Hello.</fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>"#;
+
+    let pdf_bytes = super::process_fo_document(
+        std::str::from_utf8(fo_bytes)
+            .expect("test FO is valid UTF-8"),
+    )
+    .expect("FO with inherited xmlns on fo:root should generate a valid PDF");
+
+    super::validate_pdf_bytes(&pdf_bytes);
+
+    // Extract XMP metadata via PdfRenderer
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf_bytes)
+        .expect("PDF should be parseable by fop-pdf-renderer");
+
+    let xmp = renderer
+        .extract_xmp_metadata()
+        .expect("PDF should have /Metadata stream");
+
+    // Verify the packet is standalone-parseable (no undefined prefixes)
+    use quick_xml::name::ResolveResult;
+    use quick_xml::NsReader;
+    let mut ns_reader = NsReader::from_str(&xmp);
+    ns_reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match ns_reader.read_resolved_event_into(&mut buf) {
+            Ok((ResolveResult::Unknown(prefix), _)) => {
+                panic!(
+                    "undefined prefix in /Metadata XMP: {:?}",
+                    std::str::from_utf8(&prefix)
+                );
+            }
+            Ok((_, quick_xml::events::Event::Eof)) => break,
+            Ok(_) => {}
+            Err(e) => panic!("parse error in /Metadata XMP: {e}"),
+        }
+        buf.clear();
+    }
+
+    // Verify dc:title value is preserved
+    assert!(
+        xmp.contains("Test Invoice"),
+        "XMP should contain dc:title value; got: {xmp}"
+    );
+
+    // Verify the page rendered correctly
+    assert_eq!(renderer.page_count(), 1, "should be exactly 1 page");
+    let text = renderer
+        .extract_text(0)
+        .expect("should extract text from page 0");
+    assert!(
+        text.contains("Hello"),
+        "page text should still render; got: {text}"
+    );
+}

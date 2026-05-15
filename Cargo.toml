@@ -53,6 +53,7 @@ fop-render = { workspace = true, features = ["raster"] }
 [dev-dependencies]
 criterion = { workspace = true }
 png = { workspace = true }
+quick-xml = { workspace = true }
 tempfile = { workspace = true }
 ttf-parser = { workspace = true }
 fop-pdf-renderer = { workspace = true }

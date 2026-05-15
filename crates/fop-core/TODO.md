@@ -44,4 +44,4 @@
 
 ## XMP Metadata Embedding
 
-- [~] See root `TODO.md` → **XMP Metadata Embedding (Issue #1 follow-up)** for the full plan (Phase A: `arena.rs` + `builder/mod.rs` capture logic).
+- [x] See root `TODO.md` → **XMP Metadata Embedding (Issue #1 follow-up)** for the full plan (Phase A: `arena.rs` + `builder/mod.rs` capture logic).
