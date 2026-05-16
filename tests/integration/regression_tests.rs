@@ -509,14 +509,13 @@ fn test_issue_1_declarations_xmp_produces_pages() {
   </fo:page-sequence>
 </fo:root>"##;
 
-    let pdf = super::process_fo_document(fo_input).expect(
-        "FO document with fo:declarations + x:xmpmeta must compile to a valid PDF",
-    );
+    let pdf = super::process_fo_document(fo_input)
+        .expect("FO document with fo:declarations + x:xmpmeta must compile to a valid PDF");
 
     super::validate_pdf_bytes(&pdf);
 
-    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
-        .expect("generated PDF must be parseable");
+    let renderer =
+        fop_pdf_renderer::PdfRenderer::from_bytes(&pdf).expect("generated PDF must be parseable");
     assert!(
         renderer.page_count() >= 1,
         "fo:declarations with XMP metadata must produce at least 1 page, got {}",
@@ -560,11 +559,9 @@ fn test_issue_1_namespace_inheritance_pdf_roundtrip() {
   </fo:page-sequence>
 </fo:root>"#;
 
-    let pdf_bytes = super::process_fo_document(
-        std::str::from_utf8(fo_bytes)
-            .expect("test FO is valid UTF-8"),
-    )
-    .expect("FO with inherited xmlns on fo:root should generate a valid PDF");
+    let pdf_bytes =
+        super::process_fo_document(std::str::from_utf8(fo_bytes).expect("test FO is valid UTF-8"))
+            .expect("FO with inherited xmlns on fo:root should generate a valid PDF");
 
     super::validate_pdf_bytes(&pdf_bytes);
 
@@ -616,8 +613,8 @@ fn test_issue_1_namespace_inheritance_pdf_roundtrip() {
 
 #[test]
 fn test_simple_builder_xmp_roundtrip_via_pdf_renderer_fast_path() {
-    use fop_render::pdf::simple::{BuiltinFont, SimpleDocumentBuilder};
     use fop_pdf_renderer::PdfRenderer;
+    use fop_render::pdf::simple::{BuiltinFont, SimpleDocumentBuilder};
 
     let xmp_payload = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/"><rdf:RDF><rdf:Description rdf:about=""><dc:title><rdf:Alt><rdf:li xml:lang="x-default">Audit Log Q2</rdf:li></rdf:Alt></dc:title><dc:creator><rdf:Bag><rdf:li>Compliance</rdf:li></rdf:Bag></dc:creator></rdf:Description></rdf:RDF></x:xmpmeta>"#;
 
@@ -627,8 +624,7 @@ fn test_simple_builder_xmp_roundtrip_via_pdf_renderer_fast_path() {
     b.text("Report data", 12.0, 72.0, 720.0, BuiltinFont::Helvetica);
     let bytes = b.save();
 
-    let renderer = PdfRenderer::from_bytes(&bytes)
-        .expect("fast-path PDF should parse");
+    let renderer = PdfRenderer::from_bytes(&bytes).expect("fast-path PDF should parse");
     assert!(renderer.page_count() > 0, "should have at least one page");
 
     let xmp = renderer
@@ -646,8 +642,8 @@ fn test_simple_builder_xmp_roundtrip_via_pdf_renderer_fast_path() {
 
 #[test]
 fn test_simple_builder_xmp_roundtrip_via_pdf_renderer_slow_path() {
-    use fop_render::pdf::simple::{BuiltinFont, SimpleDocumentBuilder};
     use fop_pdf_renderer::PdfRenderer;
+    use fop_render::pdf::simple::{BuiltinFont, SimpleDocumentBuilder};
 
     let xmp_payload = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/"><rdf:RDF><rdf:Description rdf:about=""><dc:title><rdf:Alt><rdf:li xml:lang="x-default">Audit Log Q2</rdf:li></rdf:Alt></dc:title><dc:creator><rdf:Bag><rdf:li>Compliance</rdf:li></rdf:Bag></dc:creator></rdf:Description></rdf:RDF></x:xmpmeta>"#;
 
@@ -657,8 +653,7 @@ fn test_simple_builder_xmp_roundtrip_via_pdf_renderer_slow_path() {
     b.text("Report data", 12.0, 72.0, 720.0, BuiltinFont::HelveticaBold);
     let bytes = b.save();
 
-    let renderer = PdfRenderer::from_bytes(&bytes)
-        .expect("slow-path PDF should parse");
+    let renderer = PdfRenderer::from_bytes(&bytes).expect("slow-path PDF should parse");
     assert!(renderer.page_count() > 0, "should have at least one page");
 
     let xmp = renderer

@@ -227,9 +227,7 @@ impl<'a> FoTreeBuilder<'a> {
                 }
             }
             Event::End(end) => {
-                let raw = std::str::from_utf8(end.as_ref())
-                    .unwrap_or("")
-                    .to_string();
+                let raw = std::str::from_utf8(end.as_ref()).unwrap_or("").to_string();
                 let depth = self.xmp_buffer.as_ref().map(|c| c.depth).unwrap_or(0);
                 if depth > 0 {
                     if let Some(cap) = &mut self.xmp_buffer {
@@ -370,7 +368,9 @@ impl<'a> FoTreeBuilder<'a> {
             return;
         }
 
-        let raw = std::str::from_utf8(start.as_ref()).unwrap_or("").to_string();
+        let raw = std::str::from_utf8(start.as_ref())
+            .unwrap_or("")
+            .to_string();
         // Check for xmpmeta (local-name only, after any prefix colon)
         let local_name = raw
             .split_once(':')
@@ -1603,10 +1603,7 @@ mod additional_tests {
         let packet = &arena.xmp_packets[0];
 
         // All three prefixes must be declared on the captured root
-        assert!(
-            packet.contains("xmlns:x="),
-            "missing xmlns:x in: {packet}"
-        );
+        assert!(packet.contains("xmlns:x="), "missing xmlns:x in: {packet}");
         assert!(
             packet.contains("xmlns:rdf="),
             "missing xmlns:rdf in: {packet}"
@@ -1764,6 +1761,9 @@ mod additional_tests {
             1,
             "xmlns:x must appear exactly once (no double-injection): {packet}"
         );
-        assert!(packet.contains("Local Decl Test"), "content preserved: {packet}");
+        assert!(
+            packet.contains("Local Decl Test"),
+            "content preserved: {packet}"
+        );
     }
 }

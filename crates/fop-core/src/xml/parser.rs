@@ -322,9 +322,13 @@ impl<R: BufRead> XmlParser<R> {
 
         // Look up namespace URI via scope stack
         let ns_uri = if let Some(ref prefix) = ns_prefix {
-            self.resolve_prefix(prefix).map(str::to_string).unwrap_or_default()
+            self.resolve_prefix(prefix)
+                .map(str::to_string)
+                .unwrap_or_default()
         } else {
-            self.resolve_prefix("").map(str::to_string).unwrap_or_default()
+            self.resolve_prefix("")
+                .map(str::to_string)
+                .unwrap_or_default()
         };
 
         let namespace = Namespace::from_uri(&ns_uri);
@@ -1617,7 +1621,11 @@ mod additional_tests {
             .iter()
             .find(|(p, _)| p == "x")
             .map(|(_, u)| u.as_str());
-        assert_eq!(x_uri, Some("inner:uri"), "innermost binding should win in snapshot");
+        assert_eq!(
+            x_uri,
+            Some("inner:uri"),
+            "innermost binding should win in snapshot"
+        );
     }
 
     #[test]

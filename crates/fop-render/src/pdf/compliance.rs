@@ -257,7 +257,7 @@ fn extract_dc_value(xmp: &str, tag: &str) -> Option<String> {
     // first <rdf:li> element (the x-default or first available value).
     if let Some(li_start) = inner.find("<rdf:li") {
         let after_li_open = li_start + 7; // len("<rdf:li")
-        // Skip past the closing '>' of the opening <rdf:li ...> tag
+                                          // Skip past the closing '>' of the opening <rdf:li ...> tag
         let tag_close = inner[after_li_open..].find('>')?;
         let val_start = after_li_open + tag_close + 1;
         let val_end = inner[val_start..].find("</rdf:li")?;
@@ -513,7 +513,10 @@ mod tests_extended {
     fn test_reconcile_xmp_adds_xpacket_wrappers() {
         let source = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF></x:xmpmeta>"#;
         let result = reconcile_xmp(source, PdfCompliance::Standard);
-        assert!(result.starts_with("<?xpacket"), "Should start with <?xpacket");
+        assert!(
+            result.starts_with("<?xpacket"),
+            "Should start with <?xpacket"
+        );
         assert!(result.ends_with("?>"), "Should end with ?>");
     }
 
@@ -541,8 +544,14 @@ mod tests_extended {
     fn test_reconcile_xmp_splices_pdfua() {
         let source = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF></x:xmpmeta>"#;
         let result = reconcile_xmp(source, PdfCompliance::PdfUA1);
-        assert!(result.contains("pdfuaid:part"), "Should contain pdfuaid:part");
-        assert!(!result.contains("pdfaid:part"), "Should NOT contain pdfaid:part");
+        assert!(
+            result.contains("pdfuaid:part"),
+            "Should contain pdfuaid:part"
+        );
+        assert!(
+            !result.contains("pdfaid:part"),
+            "Should NOT contain pdfaid:part"
+        );
     }
 
     #[test]
@@ -550,7 +559,10 @@ mod tests_extended {
         let source = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF></x:xmpmeta>"#;
         let result = reconcile_xmp(source, PdfCompliance::PdfA1bUA1);
         assert!(result.contains("pdfaid:part"), "Should contain pdfaid:part");
-        assert!(result.contains("pdfuaid:part"), "Should contain pdfuaid:part");
+        assert!(
+            result.contains("pdfuaid:part"),
+            "Should contain pdfuaid:part"
+        );
     }
 
     #[test]
@@ -566,7 +578,10 @@ mod tests_extended {
         // Should not inject a second <pdfaid:part> block.
         // The open tag "<pdfaid:part>" should appear exactly once in the output.
         let count = result.matches("<pdfaid:part>").count();
-        assert_eq!(count, 1, "<pdfaid:part> open-tag should appear exactly once");
+        assert_eq!(
+            count, 1,
+            "<pdfaid:part> open-tag should appear exactly once"
+        );
     }
 
     // ── extract_dc_fields tests ──────────────────────────────────────────────

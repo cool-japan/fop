@@ -7,8 +7,8 @@
 
 A high-performance, pure Rust reimplementation of [Apache FOP](https://xmlgraphics.apache.org/fop/) (Formatting Objects Processor), translating XSL-FO documents to PDF, SVG, PostScript, raster images, and plain text.
 
-**170 Rust files · 72,872 lines of code · 3,010+ tests · Zero warnings · 10–1200× faster than Java FOP**
-<!-- stats regenerated: 2026-04-20 -->
+**171 Rust files · 74,516 lines of code · 3,063+ tests · Zero warnings · 10–1200× faster than Java FOP**
+<!-- stats regenerated: 2026-05-16 -->
 
 ## Project Status
 
@@ -23,7 +23,7 @@ A high-performance, pure Rust reimplementation of [Apache FOP](https://xmlgraphi
 | Phase 5: Advanced Features | ✅ Complete | Image rendering, links, bookmarks, font embedding, i18n, encryption |
 | Phase 6: Optimization | 🔄 85% Complete | Performance (✅), streaming (✅), testing (✅) |
 
-**Current stats:** 3,010+ tests (all passing), 0 compiler warnings, 0 clippy warnings, **10–1200× faster than Java FOP**
+**Current stats:** 3,063+ tests (all passing), 0 compiler warnings, 0 clippy warnings, **10–1200× faster than Java FOP**
 
 ## Key Features
 
@@ -46,6 +46,10 @@ A high-performance, pure Rust reimplementation of [Apache FOP](https://xmlgraphi
 - **Bookmarks and outlines** — document navigation
 - **Internal and external links** — clickable hyperlinks
 - **Font embedding and subsetting** — TrueType/OpenType with CIDFontType2 + Identity-H encoding
+- **XMP metadata embedding** — `<fo:declarations>` block embeds XMP metadata into generated PDF output
+
+### XML Parsing
+- **Namespace scope management** — XmlParser correctly tracks namespace scope inheritance during parsing
 
 ### Internationalization (i18n)
 - **16+ languages** supported — Japanese, Chinese, Korean, Arabic, Thai, Hindi, Hebrew, and more
@@ -370,7 +374,7 @@ XSL-FO XML ──→ FO Tree ──→ Area Tree ──→ Output (PDF/SVG/PS/PN
 
 ### Testing
 
-- **3,010+ tests** — unit, integration, and fuzz targets
+- **3,063+ tests** — unit, integration, and fuzz targets
 - **Zero warnings** — enforced via `cargo clippy --all-targets -- -D warnings`
 - **Fuzz testing** — `fuzz_xml_parser`, `fuzz_property_parser`, `fuzz_layout`
 - **PDF self-verification** — `fop-pdf-renderer` renders generated PDFs back to compare

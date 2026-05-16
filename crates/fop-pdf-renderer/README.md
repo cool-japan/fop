@@ -206,6 +206,8 @@ The tool prints progress to stderr and exits with a non-zero status on error, ma
 | `PdfRenderer::render_page(idx, dpi)` | Render one page to a `RasterPage` |
 | `PdfRenderer::save_as_png(idx, path, dpi)` | Render and write a PNG file |
 | `PdfRenderer::render_all_pages(dpi)` | Render every page, return `Vec<Vec<u8>>` (PNG bytes) |
+| `PdfRenderer::extract_text(page_index)` | Extract text content from a page by decoding ToUnicode CMaps; returns `Result<String>` |
+| `PdfRenderer::extract_all_text()` | Extract text from all pages; returns `Result<Vec<String>>` |
 | `RasterPage` | Rasterized page: `width`, `height`, `pixels` (RGBA) |
 | `RasterPage::to_png()` | Encode pixels as PNG, returning `Vec<u8>` |
 | `RasterPage::save_png(path)` | Encode and write PNG to a file path |
@@ -250,7 +252,7 @@ fn verify_pdf(pdf_bytes: &[u8]) -> fop_pdf_renderer::Result<()> {
 
 ## Testing
 
-The crate includes a comprehensive test suite with **233 tests**:
+The crate includes a comprehensive test suite with **251 tests**:
 
 ```bash
 # Run all tests

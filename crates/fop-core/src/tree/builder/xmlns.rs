@@ -16,8 +16,8 @@ use quick_xml::events::BytesStart;
 /// - `""` for malformed cases like `foo:` (trailing colon)
 pub(super) fn extract_element_prefix(qname: &[u8]) -> &str {
     match qname.iter().position(|&b| b == b':') {
-        None => "",     // no colon → default namespace
-        Some(0) => "",  // leading colon → malformed, treat as default
+        None => "",    // no colon → default namespace
+        Some(0) => "", // leading colon → malformed, treat as default
         Some(pos) => {
             if pos + 1 >= qname.len() {
                 "" // trailing colon → malformed, treat as default
@@ -108,13 +108,12 @@ pub(super) fn inject_namespace_decls(
     // Clamp to valid range
     let byte_pos = root_close_byte.min(open_tag.len().saturating_sub(1));
     // If it's a self-closer `/>`  insert before the `/`
-    let insert_pos = if byte_pos > 0
-        && open_tag.as_bytes().get(byte_pos.saturating_sub(1)) == Some(&b'/')
-    {
-        byte_pos - 1
-    } else {
-        byte_pos
-    };
+    let insert_pos =
+        if byte_pos > 0 && open_tag.as_bytes().get(byte_pos.saturating_sub(1)) == Some(&b'/') {
+            byte_pos - 1
+        } else {
+            byte_pos
+        };
     let mut result = open_tag.to_string();
     result.insert_str(insert_pos, decls_block);
     result
@@ -175,10 +174,7 @@ mod tests {
     fn test_render_xmlns_attrs_default_namespace() {
         let decls = vec![("".to_string(), "http://example.com/".to_string())];
         let out = render_xmlns_attrs(&decls);
-        assert!(
-            out.contains(r#"xmlns="http://example.com/""#),
-            "got: {out}"
-        );
+        assert!(out.contains(r#"xmlns="http://example.com/""#), "got: {out}");
         assert!(!out.contains("xmlns:"), "bare xmlns should not have colon");
     }
 
@@ -188,7 +184,10 @@ mod tests {
         let root_close_byte = open_tag.len() - 1; // index of `>`
         let decls_block = r#" xmlns:x="adobe:ns:meta/""#;
         let result = inject_namespace_decls(open_tag, decls_block, root_close_byte);
-        assert!(result.starts_with(r#"<x:xmpmeta xmlns:x=""#), "got: {result}");
+        assert!(
+            result.starts_with(r#"<x:xmpmeta xmlns:x=""#),
+            "got: {result}"
+        );
         assert!(result.ends_with('>'), "got: {result}");
     }
 
@@ -198,10 +197,7 @@ mod tests {
         let root_close_byte = open_tag.len() - 1; // index of `>`
         let decls_block = r#" xmlns:x="test""#;
         let result = inject_namespace_decls(open_tag, decls_block, root_close_byte);
-        assert!(
-            result.contains(r#" xmlns:x="test"/>"#),
-            "got: {result}"
-        );
+        assert!(result.contains(r#" xmlns:x="test"/>"#), "got: {result}");
     }
 
     #[test]
@@ -226,8 +222,7 @@ mod tests {
 
     #[test]
     fn test_scan_prefixes_used_with_attr() {
-        let start =
-            BytesStart::from_content(r#"rdf:Description rdf:about="" dc:title="foo""#, 15);
+        let start = BytesStart::from_content(r#"rdf:Description rdf:about="" dc:title="foo""#, 15);
         let mut used = BTreeSet::new();
         scan_prefixes_used(&start, &mut used);
         assert!(used.contains("rdf"), "element prefix");

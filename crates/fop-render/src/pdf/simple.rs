@@ -324,11 +324,7 @@ impl SimpleDocumentBuilder {
             || xmp_metadata.is_some();
         if has_any_metadata {
             let page_count = completed_pages.len();
-            let seed = compute_file_id_seed(
-                &title,
-                page_count,
-                xmp_metadata.as_deref(),
-            );
+            let seed = compute_file_id_seed(&title, page_count, xmp_metadata.as_deref());
             doc.file_id = Some(crate::pdf::security::generate_file_id(&seed));
         }
 
@@ -554,7 +550,12 @@ fn write_minimal_pdf(doc: PdfDocument) -> Vec<u8> {
     }
 
     // /Info dict (written last, only if any field is set)
-    let has_title = doc.info.title.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
+    let has_title = doc
+        .info
+        .title
+        .as_ref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
     let has_info = has_title
         || doc.info.author.is_some()
         || doc.info.subject.is_some()
@@ -566,20 +567,14 @@ fn write_minimal_pdf(doc: PdfDocument) -> Vec<u8> {
         bytes.extend_from_slice(format!("{} 0 obj\n<<\n", info_obj_id).as_bytes());
         if let Some(ref t) = doc.info.title {
             if !t.is_empty() {
-                bytes.extend_from_slice(
-                    format!("/Title ({})\n", escape_pdf_string(t)).as_bytes(),
-                );
+                bytes.extend_from_slice(format!("/Title ({})\n", escape_pdf_string(t)).as_bytes());
             }
         }
         if let Some(ref a) = doc.info.author {
-            bytes.extend_from_slice(
-                format!("/Author ({})\n", escape_pdf_string(a)).as_bytes(),
-            );
+            bytes.extend_from_slice(format!("/Author ({})\n", escape_pdf_string(a)).as_bytes());
         }
         if let Some(ref s) = doc.info.subject {
-            bytes.extend_from_slice(
-                format!("/Subject ({})\n", escape_pdf_string(s)).as_bytes(),
-            );
+            bytes.extend_from_slice(format!("/Subject ({})\n", escape_pdf_string(s)).as_bytes());
         }
         if let Some(ref d) = doc.info.creation_date {
             bytes.extend_from_slice(
@@ -773,8 +768,14 @@ mod tests {
         b.text("x", 12.0, 100.0, 700.0, BuiltinFont::HelveticaBold); // slow path
         let bytes = b.save();
         let output = String::from_utf8_lossy(&bytes);
-        assert!(output.contains("/Author"), "should have /Author from DC creator");
-        assert!(output.contains("Alice"), "should contain Alice from dc:creator");
+        assert!(
+            output.contains("/Author"),
+            "should have /Author from DC creator"
+        );
+        assert!(
+            output.contains("Alice"),
+            "should contain Alice from dc:creator"
+        );
     }
 
     #[test]
@@ -793,7 +794,10 @@ mod tests {
         let info_author_bob = output.contains("/Author (Bob)");
         let info_author_alice = output.contains("/Author (Alice)");
         assert!(info_author_bob, "Bob should be /Author value");
-        assert!(!info_author_alice, "Alice from DC should not be /Author (Bob wins)");
+        assert!(
+            !info_author_alice,
+            "Alice from DC should not be /Author (Bob wins)"
+        );
     }
 
     #[test]
@@ -834,7 +838,8 @@ mod tests {
         assert!(
             output.contains(r"\(parenthesised\)"),
             "parentheses in /Author must be escaped; output snippet: {:?}",
-            &output[output.find("/Author").unwrap_or(0)..std::cmp::min(output.len(), output.find("/Author").unwrap_or(0) + 60)]
+            &output[output.find("/Author").unwrap_or(0)
+                ..std::cmp::min(output.len(), output.find("/Author").unwrap_or(0) + 60)]
         );
     }
 }

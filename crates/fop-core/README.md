@@ -6,7 +6,7 @@
 
 XSL-FO document parser and property system for the COOLJAPAN FOP ecosystem. This crate reads XSL-FO XML and produces a typed, arena-allocated FO tree with property inheritance.
 
-**Version:** 0.1.1 | **Release Date:** 2026-04-20
+**Version:** 0.1.2 | **Release Date:** 2026-05-16
 
 ## Features
 
@@ -17,6 +17,7 @@ XSL-FO document parser and property system for the COOLJAPAN FOP ecosystem. This
 - **29 FO element types** covering pages, blocks, tables, lists, graphics
 - **Shorthand expansion** for margin, padding, border shorthands
 - **Nesting validation** per XSL-FO 1.1 specification rules
+- **XMP metadata extraction** from `<fo:declarations>` for embedding in PDF output
 
 ## Installation
 

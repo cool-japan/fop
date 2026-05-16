@@ -22,7 +22,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["COOLJAPAN OU (Team Kitasan)"]
 license = "Apache-2.0"
@@ -60,12 +60,12 @@ fop-pdf-renderer = { workspace = true }
 
 [workspace.dependencies]
 # Internal fop-* crates
-fop-types = { path = "crates/fop-types", version = "0.1.1" }
-fop-core = { path = "crates/fop-core", version = "0.1.1" }
-fop-layout = { path = "crates/fop-layout", version = "0.1.1" }
-fop-render = { path = "crates/fop-render", version = "0.1.1", default-features = false }
-fop-pdf-renderer = { path = "crates/fop-pdf-renderer", version = "0.1.1" }
-fop-cli = { path = "crates/fop-cli", version = "0.1.1" }
+fop-types = { path = "crates/fop-types", version = "0.1.2" }
+fop-core = { path = "crates/fop-core", version = "0.1.2" }
+fop-layout = { path = "crates/fop-layout", version = "0.1.2" }
+fop-render = { path = "crates/fop-render", version = "0.1.2", default-features = false }
+fop-pdf-renderer = { path = "crates/fop-pdf-renderer", version = "0.1.2" }
+fop-cli = { path = "crates/fop-cli", version = "0.1.2" }
 # External dependencies
 thiserror = "2.0"
 log = "0.4"

@@ -12,7 +12,7 @@ This crate is part of the **COOLJAPAN FOP ecosystem** and is built with [PyO3](h
 
 > **Note:** The PyPI package name is **`fop2`** (install with `pip install fop2`), but you import it as **`import fop`** in Python.
 
-> **v0.1.1** — released **2026-04-20**: upgraded PyO3 to 0.28 (`Python::attach` replaces `Python::with_gil`); added macOS `build.rs` linker fix for `cdylib` targets.
+> **v0.1.2** — released **2026-05-16**: upgraded PyO3 to 0.28 (`Python::attach` replaces `Python::with_gil`); added macOS `build.rs` linker fix for `cdylib` targets.
 
 ---
 
@@ -96,7 +96,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fop-python = "0.1.1"
+fop-python = "0.1.2"
 ```
 
 ---
@@ -232,7 +232,7 @@ pdf_bytes = fop.convert_to_pdf(fo_xml)
 svg_string = fop.convert_to_svg(fo_xml)
 
 # Get version
-print(fop.version())  # fop-python 0.1.1
+print(fop.version())  # fop-python 0.1.2
 ```
 
 ### Error handling

@@ -188,6 +188,13 @@ assert!(!image.contains_glyph(".notdef"));
 - [x] **macOS build.rs linker fix** — added `build.rs` to `fop-python` to resolve PyO3 ABI3 linker issues on macOS (`-undefined dynamic_lookup` flag)
 - [x] **fop-wasm invalid XML test fixes** — corrected WASM binding error-handling tests to match updated error message format for malformed XML inputs
 
+## Version 0.1.2 Enhancements (last updated 2026-05-16)
+- [x] **XMP metadata embedding from `<fo:declarations>`** — capture `<x:xmpmeta>` packets, write `/Metadata` stream in PDF catalog, sync `/Info` dictionary from Dublin Core fields (completed 2026-05-14)
+- [x] **Namespace scope stack in `XmlParser`** — replaced flat `namespace_map` with a proper `Vec<NamespaceScope>` scope stack; captures inherited `xmlns:` prefixes and injects only used ones into captured XMP/SVG root elements; `Event::CData`/`Event::Comment` round-trip in both capture buffers (completed 2026-05-15)
+- [x] **`/Info` PDF string value escaping in `PdfDocument::to_bytes()`** — applied `escape_pdf_string` to `/Title`, `/Author`, `/Subject`, `/CreationDate` in the trailer write path (completed 2026-05-16)
+- [x] **Extended `dc:date`/`dc:rights`/`dc:language` extraction from XMP** — added three fields to `DcFields` in `compliance.rs`, extraction logic, and unit tests (completed 2026-05-16)
+- [x] **SimpleDocumentBuilder XMP support** — wired `<x:xmpmeta>` packets, full `/Info` metadata surface, Dublin-Core → `/Info` sync, deterministic `/ID` trailer, and `/Catalog /Metadata` stream into `SimpleDocumentBuilder` (completed 2026-05-16)
+
 ## XMP Metadata Embedding (Issue #1 follow-up)
 
 - [x] XMP metadata embedding — capture `<x:xmpmeta>` from `fo:declarations`, write the PDF `/Metadata` stream, and sync the `/Info` dictionary (issue #1 follow-up) (completed 2026-05-14)
