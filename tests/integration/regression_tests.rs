@@ -470,6 +470,60 @@ fn test_issue_1_declarations_xmpmeta_zero_pages() {
     );
 }
 
+/// Regression test for GitHub issue #1 (cool-japan/fop):
+/// `<fo:declarations>` containing an `<x:xmpmeta>` XMP block must still
+/// produce a PDF with **at least one page**.
+///
+/// Before the fix the non-FO end-tags inside `<fo:declarations>` incorrectly
+/// called `end_element()`, which walked `current_node` up the arena parent
+/// chain before `<fo:page-sequence>` was encountered.  The page-sequence was
+/// then orphaned in the arena and never reached the layout engine, yielding a
+/// zero-page PDF.
+///
+/// The fix introduces `non_fo_depth` to consume non-FO close-tags without
+/// touching `current_node`, so the page-sequence is correctly attached.
+#[test]
+fn test_issue_1_declarations_xmp_produces_pages() {
+    let fo_input = r##"<?xml version="1.0" encoding="utf-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-width="210mm" page-height="297mm">
+      <fo:region-body margin="2cm"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:declarations>
+    <x:xmpmeta xmlns:x="adobe:ns:meta/">
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" rdf:about="">
+          <dc:title>
+            <rdf:Alt><rdf:li xml:lang="x-default">Issue 1 Regression</rdf:li></rdf:Alt>
+          </dc:title>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>
+  </fo:declarations>
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block>Issue 1 regression: declarations + XMP must not suppress pages.</fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>"##;
+
+    let pdf = super::process_fo_document(fo_input).expect(
+        "FO document with fo:declarations + x:xmpmeta must compile to a valid PDF",
+    );
+
+    super::validate_pdf_bytes(&pdf);
+
+    let renderer = fop_pdf_renderer::PdfRenderer::from_bytes(&pdf)
+        .expect("generated PDF must be parseable");
+    assert!(
+        renderer.page_count() >= 1,
+        "fo:declarations with XMP metadata must produce at least 1 page, got {}",
+        renderer.page_count()
+    );
+}
+
 /// Regression test: xmlns:x / xmlns:rdf / xmlns:dc declared on `<fo:root>` (not on
 /// `<x:xmpmeta>`) must produce a standalone-well-formed XMP packet in the PDF
 /// `/Metadata` stream — no undefined namespace prefixes.
@@ -557,5 +611,65 @@ fn test_issue_1_namespace_inheritance_pdf_roundtrip() {
     assert!(
         text.contains("Hello"),
         "page text should still render; got: {text}"
+    );
+}
+
+#[test]
+fn test_simple_builder_xmp_roundtrip_via_pdf_renderer_fast_path() {
+    use fop_render::pdf::simple::{BuiltinFont, SimpleDocumentBuilder};
+    use fop_pdf_renderer::PdfRenderer;
+
+    let xmp_payload = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/"><rdf:RDF><rdf:Description rdf:about=""><dc:title><rdf:Alt><rdf:li xml:lang="x-default">Audit Log Q2</rdf:li></rdf:Alt></dc:title><dc:creator><rdf:Bag><rdf:li>Compliance</rdf:li></rdf:Bag></dc:creator></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+
+    let mut b = SimpleDocumentBuilder::new("Audit Log Q2");
+    b.set_xmp_metadata(xmp_payload);
+    // Helvetica only → fast path
+    b.text("Report data", 12.0, 72.0, 720.0, BuiltinFont::Helvetica);
+    let bytes = b.save();
+
+    let renderer = PdfRenderer::from_bytes(&bytes)
+        .expect("fast-path PDF should parse");
+    assert!(renderer.page_count() > 0, "should have at least one page");
+
+    let xmp = renderer
+        .extract_xmp_metadata()
+        .expect("fast-path PDF should have XMP metadata");
+    assert!(
+        xmp.contains("<x:xmpmeta"),
+        "XMP should contain <x:xmpmeta; got: {xmp:?}"
+    );
+    assert!(
+        xmp.contains("Audit Log Q2") || xmp.contains("Compliance"),
+        "XMP should contain payload content; got: {xmp:?}"
+    );
+}
+
+#[test]
+fn test_simple_builder_xmp_roundtrip_via_pdf_renderer_slow_path() {
+    use fop_render::pdf::simple::{BuiltinFont, SimpleDocumentBuilder};
+    use fop_pdf_renderer::PdfRenderer;
+
+    let xmp_payload = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/"><rdf:RDF><rdf:Description rdf:about=""><dc:title><rdf:Alt><rdf:li xml:lang="x-default">Audit Log Q2</rdf:li></rdf:Alt></dc:title><dc:creator><rdf:Bag><rdf:li>Compliance</rdf:li></rdf:Bag></dc:creator></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+
+    let mut b = SimpleDocumentBuilder::new("Audit Log Q2");
+    b.set_xmp_metadata(xmp_payload);
+    // HelveticaBold → slow path
+    b.text("Report data", 12.0, 72.0, 720.0, BuiltinFont::HelveticaBold);
+    let bytes = b.save();
+
+    let renderer = PdfRenderer::from_bytes(&bytes)
+        .expect("slow-path PDF should parse");
+    assert!(renderer.page_count() > 0, "should have at least one page");
+
+    let xmp = renderer
+        .extract_xmp_metadata()
+        .expect("slow-path PDF should have XMP metadata");
+    assert!(
+        xmp.contains("<x:xmpmeta"),
+        "XMP should contain <x:xmpmeta; got: {xmp:?}"
+    );
+    assert!(
+        xmp.contains("Audit Log Q2") || xmp.contains("Compliance"),
+        "XMP should contain payload content; got: {xmp:?}"
     );
 }

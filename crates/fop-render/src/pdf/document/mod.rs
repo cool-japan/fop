@@ -707,20 +707,31 @@ impl PdfDocument {
             bytes.extend_from_slice(b"/Info <<\n");
 
             if let Some(ref title) = self.info.title {
-                bytes.extend_from_slice(format!("  /Title ({})\n", title).as_bytes());
+                bytes.extend_from_slice(
+                    format!("  /Title ({})\n", outline::escape_pdf_string(title)).as_bytes(),
+                );
             }
 
             if let Some(ref author) = self.info.author {
-                bytes.extend_from_slice(format!("  /Author ({})\n", author).as_bytes());
+                bytes.extend_from_slice(
+                    format!("  /Author ({})\n", outline::escape_pdf_string(author)).as_bytes(),
+                );
             }
 
             if let Some(ref subject) = self.info.subject {
-                bytes.extend_from_slice(format!("  /Subject ({})\n", subject).as_bytes());
+                bytes.extend_from_slice(
+                    format!("  /Subject ({})\n", outline::escape_pdf_string(subject)).as_bytes(),
+                );
             }
 
             if let Some(ref creation_date) = self.info.creation_date {
-                bytes
-                    .extend_from_slice(format!("  /CreationDate ({})\n", creation_date).as_bytes());
+                bytes.extend_from_slice(
+                    format!(
+                        "  /CreationDate ({})\n",
+                        outline::escape_pdf_string(creation_date)
+                    )
+                    .as_bytes(),
+                );
             }
 
             bytes.extend_from_slice(b">>\n");
@@ -1499,5 +1510,21 @@ mod tests_document_comprehensive {
         doc.set_encryption(dict, fid).expect("test: should succeed");
         let result = doc.set_compliance(PdfCompliance::PdfA1b);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_info_escapes_parentheses_in_title() {
+        let mut doc = PdfDocument::new();
+        doc.info.title = Some("(parenthesised)".to_string());
+        let bytes = doc.to_bytes().expect("test: should succeed");
+        let content = String::from_utf8_lossy(&bytes);
+        // The raw string r"\(parenthesised\)" is the PDF-escaped form
+        assert!(
+            content.contains(r"/Title (\(parenthesised\))"),
+            "Expected PDF-escaped title with backslash-escaped parentheses; got:\n{}",
+            content
+        );
+        // The unescaped form must NOT appear
+        assert!(!content.contains("/Title ((parenthesised))"));
     }
 }

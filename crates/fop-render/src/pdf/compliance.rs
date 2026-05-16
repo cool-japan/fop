@@ -215,6 +215,12 @@ pub struct DcFields {
     pub creator: Option<String>,
     /// `dc:description` — document subject/description
     pub description: Option<String>,
+    /// `dc:date` — publication or creation date
+    pub date: Option<String>,
+    /// `dc:rights` — copyright or rights statement
+    pub rights: Option<String>,
+    /// `dc:language` — document language (e.g. "en", "fr")
+    pub language: Option<String>,
 }
 
 /// Extract Dublin Core metadata fields from a raw XMP packet string.
@@ -227,6 +233,9 @@ pub fn extract_dc_fields(xmp: &str) -> DcFields {
         title: extract_dc_value(xmp, "title"),
         creator: extract_dc_value(xmp, "creator"),
         description: extract_dc_value(xmp, "description"),
+        date: extract_dc_value(xmp, "date"),
+        rights: extract_dc_value(xmp, "rights"),
+        language: extract_dc_value(xmp, "language"),
     }
 }
 
@@ -607,5 +616,29 @@ mod tests_extended {
         assert!(fields.title.is_none());
         assert!(fields.creator.is_none());
         assert!(fields.description.is_none());
+        assert!(fields.date.is_none());
+        assert!(fields.rights.is_none());
+        assert!(fields.language.is_none());
+    }
+
+    #[test]
+    fn test_extract_dc_date_from_xmp() {
+        let xmp = r#"<dc:date>2026-05-15</dc:date>"#;
+        let dc = extract_dc_fields(xmp);
+        assert_eq!(dc.date.as_deref(), Some("2026-05-15"));
+    }
+
+    #[test]
+    fn test_extract_dc_rights_from_xmp() {
+        let xmp = r#"<dc:rights>CC-BY 4.0</dc:rights>"#;
+        let dc = extract_dc_fields(xmp);
+        assert_eq!(dc.rights.as_deref(), Some("CC-BY 4.0"));
+    }
+
+    #[test]
+    fn test_extract_dc_language_from_xmp() {
+        let xmp = r#"<dc:language>en</dc:language>"#;
+        let dc = extract_dc_fields(xmp);
+        assert_eq!(dc.language.as_deref(), Some("en"));
     }
 }
