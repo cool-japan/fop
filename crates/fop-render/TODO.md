@@ -32,3 +32,7 @@
 - [x] Test PDF output with multiple PDF viewers (gs, pdftotext, pdfinfo)
 - [x] Validate generated PDFs with `pdfinfo` / `qpdf --check`
 - [x] Benchmark rendering speed for large documents
+
+## XMP Metadata Embedding
+
+- [x] See root `TODO.md` → **XMP Metadata Embedding (Issue #1 follow-up)** for the full plan (Phase B: `document/`, `compliance.rs`, `writer.rs`).

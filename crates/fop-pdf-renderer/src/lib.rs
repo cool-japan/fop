@@ -100,6 +100,17 @@ impl PdfRenderer {
         }
         Ok(out)
     }
+
+    /// Extract the XMP metadata packet from the PDF catalog `/Metadata` stream.
+    ///
+    /// Returns the raw UTF-8 string of the XMP packet (including any
+    /// `<?xpacket ...?>` processing instructions), or `None` if the document
+    /// does not have an embedded XMP stream or the stream bytes are not valid
+    /// UTF-8.
+    pub fn extract_xmp_metadata(&self) -> Option<String> {
+        let bytes = self.doc.get_metadata_stream()?;
+        String::from_utf8(bytes).ok()
+    }
 }
 
 #[cfg(test)]

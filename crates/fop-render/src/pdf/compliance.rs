@@ -203,6 +203,146 @@ xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\">\n   \
     )
 }
 
+/// Extracted Dublin Core fields from an XMP packet.
+///
+/// All fields are `Option<String>`; absent means the field was not found in
+/// the XMP source (or could not be parsed).
+#[derive(Debug, Default, Clone)]
+pub struct DcFields {
+    /// `dc:title` — document title
+    pub title: Option<String>,
+    /// `dc:creator` — document author/creator
+    pub creator: Option<String>,
+    /// `dc:description` — document subject/description
+    pub description: Option<String>,
+    /// `dc:date` — publication or creation date
+    pub date: Option<String>,
+    /// `dc:rights` — copyright or rights statement
+    pub rights: Option<String>,
+    /// `dc:language` — document language (e.g. "en", "fr")
+    pub language: Option<String>,
+}
+
+/// Extract Dublin Core metadata fields from a raw XMP packet string.
+///
+/// Uses lightweight text-search heuristics rather than a full XML parser so
+/// that there are no additional dependencies.  This is intentionally
+/// best-effort: if a field uses a non-standard layout it may not be found.
+pub fn extract_dc_fields(xmp: &str) -> DcFields {
+    DcFields {
+        title: extract_dc_value(xmp, "title"),
+        creator: extract_dc_value(xmp, "creator"),
+        description: extract_dc_value(xmp, "description"),
+        date: extract_dc_value(xmp, "date"),
+        rights: extract_dc_value(xmp, "rights"),
+        language: extract_dc_value(xmp, "language"),
+    }
+}
+
+/// Extract the text value of a `dc:<tag>` element from an XMP string.
+///
+/// Handles the common `<rdf:Alt><rdf:li ...>VALUE</rdf:li></rdf:Alt>` pattern
+/// (used by dc:title) as well as the simpler `<dc:TAG>VALUE</dc:TAG>` pattern.
+fn extract_dc_value(xmp: &str, tag: &str) -> Option<String> {
+    // Pattern 1: <dc:TAG> ... </dc:TAG>  (simple or with nested rdf:Alt/li)
+    let open_tag = format!("<dc:{}>", tag);
+    let close_tag = format!("</dc:{}>", tag);
+
+    let start_pos = xmp.find(&open_tag)?;
+    let after_open = start_pos + open_tag.len();
+    let end_pos = xmp[after_open..].find(&close_tag)?;
+    let inner = &xmp[after_open..after_open + end_pos];
+
+    // If the inner content contains <rdf:li, extract the text content of the
+    // first <rdf:li> element (the x-default or first available value).
+    if let Some(li_start) = inner.find("<rdf:li") {
+        let after_li_open = li_start + 7; // len("<rdf:li")
+                                          // Skip past the closing '>' of the opening <rdf:li ...> tag
+        let tag_close = inner[after_li_open..].find('>')?;
+        let val_start = after_li_open + tag_close + 1;
+        let val_end = inner[val_start..].find("</rdf:li")?;
+        let value = inner[val_start..val_start + val_end].trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    // Plain text content directly inside <dc:TAG>...</dc:TAG>
+    let value = inner.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Reconcile a user-supplied XMP packet for embedding in a PDF.
+///
+/// Performs the following transformations:
+/// 1. Wraps the packet in `<?xpacket begin="…" id="…"?>` / `<?xpacket end="w"?>`
+///    headers if they are absent.
+/// 2. Splices compliance identifiers (`pdfaid` for PDF/A-1b, `pdfuaid` for
+///    PDF/UA-1) into the RDF graph when the corresponding compliance mode is
+///    active and those blocks are not already present.
+///
+/// # Arguments
+/// * `source` — raw XMP XML string (must contain `<x:xmpmeta ...>`)
+/// * `compliance` — current PDF compliance mode
+pub fn reconcile_xmp(source: &str, compliance: PdfCompliance) -> String {
+    // Step 1: Ensure <?xpacket?> wrappers are present
+    let with_wrappers = if source.contains("<?xpacket") {
+        source.to_string()
+    } else {
+        // Wrap the entire source in xpacket processing instructions
+        format!(
+            "<?xpacket begin=\"\u{FEFF}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n{}\n<?xpacket end=\"w\"?>",
+            source
+        )
+    };
+
+    // Step 2: Splice in compliance identifiers if not already present
+    let pdfa_block = r#"  <rdf:Description rdf:about=""
+     xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/">
+   <pdfaid:part>1</pdfaid:part>
+   <pdfaid:conformance>B</pdfaid:conformance>
+  </rdf:Description>"#;
+
+    let pdfua_block = r#"  <rdf:Description rdf:about=""
+     xmlns:pdfuaid="http://www.aiim.org/pdfua/ns/id/">
+   <pdfuaid:part>1</pdfuaid:part>
+  </rdf:Description>"#;
+
+    // Determine which blocks need to be injected
+    let needs_pdfa = compliance.requires_pdfa() && !with_wrappers.contains("pdfaid:part");
+    let needs_pdfua = compliance.requires_pdfua() && !with_wrappers.contains("pdfuaid:part");
+
+    if !needs_pdfa && !needs_pdfua {
+        return with_wrappers;
+    }
+
+    // Inject just before </rdf:RDF>
+    let injection_point = "</rdf:RDF>";
+    if let Some(rdf_close_pos) = with_wrappers.find(injection_point) {
+        let mut injected = String::with_capacity(with_wrappers.len() + 256);
+        injected.push_str(&with_wrappers[..rdf_close_pos]);
+        if needs_pdfa {
+            injected.push('\n');
+            injected.push_str(pdfa_block);
+            injected.push('\n');
+        }
+        if needs_pdfua {
+            injected.push('\n');
+            injected.push_str(pdfua_block);
+            injected.push('\n');
+        }
+        injected.push_str(&with_wrappers[rdf_close_pos..]);
+        injected
+    } else {
+        // No </rdf:RDF> found — return with wrappers only, no injection
+        with_wrappers
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +505,155 @@ mod tests_extended {
         let c = PdfCompliance::PdfA1b;
         let c2 = c;
         assert_eq!(c, c2);
+    }
+
+    // ── reconcile_xmp tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_reconcile_xmp_adds_xpacket_wrappers() {
+        let source = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF></x:xmpmeta>"#;
+        let result = reconcile_xmp(source, PdfCompliance::Standard);
+        assert!(
+            result.starts_with("<?xpacket"),
+            "Should start with <?xpacket"
+        );
+        assert!(result.ends_with("?>"), "Should end with ?>");
+    }
+
+    #[test]
+    fn test_reconcile_xmp_keeps_existing_wrappers() {
+        let source = "<?xpacket begin=\"\u{FEFF}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"></rdf:RDF></x:xmpmeta>\n<?xpacket end=\"w\"?>";
+        let result = reconcile_xmp(source, PdfCompliance::Standard);
+        // Should not double-wrap
+        let count = result.matches("<?xpacket").count();
+        assert_eq!(count, 2, "Should have exactly two xpacket PIs");
+    }
+
+    #[test]
+    fn test_reconcile_xmp_splices_pdfa() {
+        let source = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF></x:xmpmeta>"#;
+        let result = reconcile_xmp(source, PdfCompliance::PdfA1b);
+        assert!(result.contains("pdfaid:part"), "Should contain pdfaid:part");
+        assert!(
+            result.contains("pdfaid:conformance"),
+            "Should contain pdfaid:conformance"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_xmp_splices_pdfua() {
+        let source = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF></x:xmpmeta>"#;
+        let result = reconcile_xmp(source, PdfCompliance::PdfUA1);
+        assert!(
+            result.contains("pdfuaid:part"),
+            "Should contain pdfuaid:part"
+        );
+        assert!(
+            !result.contains("pdfaid:part"),
+            "Should NOT contain pdfaid:part"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_xmp_splices_both_for_combined() {
+        let source = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF></x:xmpmeta>"#;
+        let result = reconcile_xmp(source, PdfCompliance::PdfA1bUA1);
+        assert!(result.contains("pdfaid:part"), "Should contain pdfaid:part");
+        assert!(
+            result.contains("pdfuaid:part"),
+            "Should contain pdfuaid:part"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_xmp_does_not_duplicate_existing_pdfa() {
+        let source = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/">
+    <pdfaid:part>1</pdfaid:part>
+    <pdfaid:conformance>B</pdfaid:conformance>
+  </rdf:Description>
+</rdf:RDF></x:xmpmeta>"#;
+        let result = reconcile_xmp(source, PdfCompliance::PdfA1b);
+        // Should not inject a second <pdfaid:part> block.
+        // The open tag "<pdfaid:part>" should appear exactly once in the output.
+        let count = result.matches("<pdfaid:part>").count();
+        assert_eq!(
+            count, 1,
+            "<pdfaid:part> open-tag should appear exactly once"
+        );
+    }
+
+    // ── extract_dc_fields tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_dc_fields_title_from_alt() {
+        let xmp = r#"<?xpacket begin="" id="W"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title><rdf:Alt><rdf:li xml:lang="x-default">My Test Document</rdf:li></rdf:Alt></dc:title>
+  </rdf:Description>
+</rdf:RDF></x:xmpmeta>
+<?xpacket end="w"?>"#;
+        let fields = extract_dc_fields(xmp);
+        assert_eq!(fields.title.as_deref(), Some("My Test Document"));
+    }
+
+    #[test]
+    fn test_extract_dc_fields_title_simple() {
+        let xmp = r#"<dc:title>Simple Title</dc:title>"#;
+        let fields = extract_dc_fields(xmp);
+        assert_eq!(fields.title.as_deref(), Some("Simple Title"));
+    }
+
+    #[test]
+    fn test_extract_dc_fields_creator() {
+        let xmp = r#"<dc:creator>Jane Doe</dc:creator>"#;
+        let fields = extract_dc_fields(xmp);
+        assert_eq!(fields.creator.as_deref(), Some("Jane Doe"));
+    }
+
+    #[test]
+    fn test_extract_dc_fields_description() {
+        let xmp = r#"<dc:description>A document about things.</dc:description>"#;
+        let fields = extract_dc_fields(xmp);
+        assert_eq!(
+            fields.description.as_deref(),
+            Some("A document about things.")
+        );
+    }
+
+    #[test]
+    fn test_extract_dc_fields_absent_returns_none() {
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>"#;
+        let fields = extract_dc_fields(xmp);
+        assert!(fields.title.is_none());
+        assert!(fields.creator.is_none());
+        assert!(fields.description.is_none());
+        assert!(fields.date.is_none());
+        assert!(fields.rights.is_none());
+        assert!(fields.language.is_none());
+    }
+
+    #[test]
+    fn test_extract_dc_date_from_xmp() {
+        let xmp = r#"<dc:date>2026-05-15</dc:date>"#;
+        let dc = extract_dc_fields(xmp);
+        assert_eq!(dc.date.as_deref(), Some("2026-05-15"));
+    }
+
+    #[test]
+    fn test_extract_dc_rights_from_xmp() {
+        let xmp = r#"<dc:rights>CC-BY 4.0</dc:rights>"#;
+        let dc = extract_dc_fields(xmp);
+        assert_eq!(dc.rights.as_deref(), Some("CC-BY 4.0"));
+    }
+
+    #[test]
+    fn test_extract_dc_language_from_xmp() {
+        let xmp = r#"<dc:language>en</dc:language>"#;
+        let dc = extract_dc_fields(xmp);
+        assert_eq!(dc.language.as_deref(), Some("en"));
     }
 }

@@ -187,3 +187,94 @@ assert!(!image.contains_glyph(".notdef"));
 - [x] **PyO3 0.28 migration** — updated `fop-python` to PyO3 0.28 and ported to the new `Python::attach` API (replaces `Python::with_gil`)
 - [x] **macOS build.rs linker fix** — added `build.rs` to `fop-python` to resolve PyO3 ABI3 linker issues on macOS (`-undefined dynamic_lookup` flag)
 - [x] **fop-wasm invalid XML test fixes** — corrected WASM binding error-handling tests to match updated error message format for malformed XML inputs
+
+## Version 0.1.2 Enhancements (last updated 2026-05-16)
+- [x] **XMP metadata embedding from `<fo:declarations>`** — capture `<x:xmpmeta>` packets, write `/Metadata` stream in PDF catalog, sync `/Info` dictionary from Dublin Core fields (completed 2026-05-14)
+- [x] **Namespace scope stack in `XmlParser`** — replaced flat `namespace_map` with a proper `Vec<NamespaceScope>` scope stack; captures inherited `xmlns:` prefixes and injects only used ones into captured XMP/SVG root elements; `Event::CData`/`Event::Comment` round-trip in both capture buffers (completed 2026-05-15)
+- [x] **`/Info` PDF string value escaping in `PdfDocument::to_bytes()`** — applied `escape_pdf_string` to `/Title`, `/Author`, `/Subject`, `/CreationDate` in the trailer write path (completed 2026-05-16)
+- [x] **Extended `dc:date`/`dc:rights`/`dc:language` extraction from XMP** — added three fields to `DcFields` in `compliance.rs`, extraction logic, and unit tests (completed 2026-05-16)
+- [x] **SimpleDocumentBuilder XMP support** — wired `<x:xmpmeta>` packets, full `/Info` metadata surface, Dublin-Core → `/Info` sync, deterministic `/ID` trailer, and `/Catalog /Metadata` stream into `SimpleDocumentBuilder` (completed 2026-05-16)
+
+## XMP Metadata Embedding (Issue #1 follow-up)
+
+- [x] XMP metadata embedding — capture `<x:xmpmeta>` from `fo:declarations`, write the PDF `/Metadata` stream, and sync the `/Info` dictionary (issue #1 follow-up) (completed 2026-05-14)
+  - **Goal:** An FO document whose `<fo:declarations>` contains an `<x:xmpmeta>` RDF/XML packet produces a PDF in which (a) the catalog has a `/Metadata N 0 R` reference, (b) object N is a `/Type /Metadata /Subtype /XML` stream containing the source XMP packet (xpacket-wrapped), and (c) the `/Info` dictionary's `/Title`, `/Author`, `/Subject` are auto-populated from the packet's Dublin Core fields. The issue #1 reporter's exact FO round-trips: `extract_xmp_metadata()` returns the packet, `extract_text()` still returns "Hello.", `page_count() == 1`.
+  - **Design:**
+    - **Phase A — capture (`fop-core`).**
+      - `arena.rs`: add `pub xmp_packets: Vec<String>` to `FoArena`, initialised in both `new()` and `with_capacity()`. *`Vec` (not `Option`) chosen consciously:* the builder's event loop just `push`es as it finalises each packet — no "already captured?" guard in the hot path — and the consumer takes `.first()`. Captures all, uses first; honest, and preserves info for a future multi-packet decision.
+      - `builder/mod.rs`: extend the existing non-FO branch (the issue #1 `non_fo_depth` machinery). Add field `xmp_buffer: Option<String>`. When a non-FO `Event::Start` arrives with `non_fo_depth == 0`, `current_node` is a `FoNodeData::Declarations`, and the element local-name is `xmpmeta`: start a buffer. While `xmp_buffer.is_some()`, reconstruct **every** non-FO `Start`/`Empty`/`End`/`Text`/`CData` event into the buffer. When the matching `End` brings `non_fo_depth` back to 0, push the buffer to `arena.xmp_packets`. Check `foreign_object_node` first, then `xmp_buffer`, then the plain `non_fo_depth` skip — mutually exclusive in practice.
+    - **Phase B — write `/Metadata` stream (`fop-render`).**
+      - `document/types.rs`: add `pub xmp_metadata: Option<String>` to `PdfDocument`; init `None` in `new()`.
+      - `document/mod.rs`: add `set_xmp_metadata(&mut self, xmp: String)`. In `to_bytes()`: compute `let needs_xmp = needs_compliance || self.xmp_metadata.is_some();`. Change xmp_obj_count gate, catalog ref, and stream-emit block to use `needs_xmp`. Stream content: `match &self.xmp_metadata { Some(src) => reconcile_xmp(src, self.compliance), None => generate_xmp_metadata(...) }`.
+      - `compliance.rs`: add `reconcile_xmp(source: &str, compliance: PdfCompliance) -> String` and `extract_dc_fields(xmp: &str) -> DcFields`.
+    - **Phase B.5 — sync `/Info` from Dublin Core (`fop-render`).** Bridge `fo_tree.xmp_packets.first()` → `doc.set_xmp_metadata(...)` in `render_with_fo()`, then fill any unset `doc.info.title/author/subject` from `extract_dc_fields`. Do not overwrite values already set.
+    - **Phase C — extract + round-trip (`fop-pdf-renderer`).**
+      - `parser.rs`: add `pub fn get_metadata_stream(&self) -> Option<Vec<u8>>` — `find_catalog` → catalog `/Metadata` ref → `decode_stream(obj_num)`.
+      - `lib.rs`: add `pub fn extract_xmp_metadata(&self) -> Option<String>` delegating to it via `String::from_utf8(...).ok()`.
+  - **Files:**
+    - `crates/fop-core/src/tree/arena.rs` — `xmp_packets` field
+    - `crates/fop-core/src/tree/builder/mod.rs` — capture logic in the non-FO branch
+    - `crates/fop-render/src/pdf/document/types.rs` — `PdfDocument.xmp_metadata` field
+    - `crates/fop-render/src/pdf/document/mod.rs` — `set_xmp_metadata()`, `to_bytes()` ID chain + catalog ref + stream emit
+    - `crates/fop-render/src/pdf/compliance.rs` — `reconcile_xmp()`, `extract_dc_fields()`
+    - `crates/fop-render/src/pdf/writer.rs` — `render_with_fo()` bridge + `/Info` sync
+    - `crates/fop-pdf-renderer/src/parser.rs` — `get_metadata_stream()`
+    - `crates/fop-pdf-renderer/src/lib.rs` — `extract_xmp_metadata()`
+    - `tests/integration/regression_tests.rs` — round-trip regression test
+    - `TODO.md` (root) — this plan block; `crates/fop-core/TODO.md` + `crates/fop-render/TODO.md` — one-line back-reference
+  - **Prerequisites:** none external. Phases are strictly sequential within one subagent.
+  - **Tests:**
+    - `fop-core` unit: `test_xmp_packet_captured_from_declarations`
+    - `fop-render` unit: `test_pdf_document_writes_metadata_stream`, `test_reconcile_xmp_standard_wraps_xpacket`, `test_reconcile_xmp_pdfa_splices_identifiers`, `test_extract_dc_fields`
+    - integration: `test_issue_1_xmp_metadata_roundtrip`
+    - Full workspace: `cargo nextest run --all-features` — 2828+ tests green; clippy clean.
+  - **Risk:**
+    - Object-ID chain fragility: switching xmp gate from `needs_compliance` to `needs_xmp` shifts later IDs. Mitigation: pdf-renderer parses via xref (renumber-robust); full regression test suite catches off-by-one.
+    - Namespace self-containment assumption: XMP subtree must declare its own xmlns prefixes.
+
+## Proposed follow-ups
+
+- [x] SimpleDocumentBuilder XMP support — wire `<x:xmpmeta>` packets, full `/Info` metadata surface (author / subject / creation_date / lang), Dublin-Core → `/Info` sync, deterministic `/ID` trailer array, and `/Catalog /Metadata` stream into **both** the fast path (`PdfDocument::to_bytes()` delegation) and the slow path (`write_minimal_pdf`) of `SimpleDocumentBuilder` (done 2026-05-16)
+- [x] XMP namespace-inheritance hardening — proper namespace scope stack in `XmlParser`; capture-time injection of *only the in-scope `xmlns:` prefixes actually used by the subtree* into the captured root open tag; same fix applied to `instream-foreign-object` capture; round-trip `Event::CData` / `Event::Comment` in both capture buffers (planned 2026-05-15)
+  - **Goal:** When an FO document declares `xmlns:x`, `xmlns:rdf`, `xmlns:dc` on `<fo:root>` (the standard XSL-FO authoring style) and then writes `<x:xmpmeta>…</x:xmpmeta>` inside `<fo:declarations>` without redeclaring those prefixes locally, the captured packet stored in `FoArena.xmp_packets[0]` is **standalone-well-formed RDF/XML** (no undefined prefixes, parseable by a strict namespace-aware reader, all in-scope `xmlns:` decls that the subtree actually references appear on the captured `<x:xmpmeta>` root element verbatim). The same guarantee holds for `instream-foreign-object` (SVG inside `fo:instream-foreign-object` survives ancestor `xmlns:svg`). CData sections and comments inside either capture round-trip byte-for-byte. The PDF `/Metadata` stream a user gets from `extract_xmp_metadata()` is therefore parseable by any conforming RDF/XML reader. No regression in the 3024 existing tests.
+  - **Design:**
+    - **Phase 1 — proper namespace scope stack (`fop-core/src/xml/parser.rs`).**
+      - Replace `namespace_map: HashMap<String, String>` with `namespace_stack: Vec<NamespaceScope>` where `NamespaceScope { decls: Vec<(String, String)> }` (prefix, uri pairs declared on one element's open tag). Always push (even an empty frame) so pop is symmetric.
+      - Add `push_namespace_scope(&mut self, start: &BytesStart)` — parse `xmlns`/`xmlns:*` attrs, push new scope.
+      - Add `pop_namespace_scope(&mut self)` — soft pop (no panic on underflow).
+      - Add `resolve_prefix(&self, prefix: &str) -> Option<&str>` — scan stack top-down, return first match.
+      - Add `snapshot_in_scope(&self) -> Vec<(String, String)>` — fold bottom-up (innermost wins), sort by prefix, return owned Vec.
+      - Update `extract_name()` to use `resolve_prefix` instead of `namespace_map.get`.
+      - Delete `update_namespaces()` — replaced by loop-top push in the builder.
+    - **Phase 2 — push/pop integration in the builder (`fop-core/src/tree/builder/mod.rs`).**
+      - At the very top of the parse loop: on `Event::Start` push before dispatch; on `Event::End` pop after dispatch; on `Event::Empty` push+dispatch+pop.
+      - Remove the three legacy `parser.update_namespaces(start)` calls (Phase 1 deletes the method so these would fail to compile anyway).
+    - **Phase 3 — capture-time prefix tracking + injection (`builder/mod.rs` + new `builder/xmlns.rs`).**
+      - New file `xmlns.rs` (~120 lines): pure helpers `extract_prefix`, `scan_prefixes_used`, `declared_on_element`, `render_xmlns_attrs`, `inject_namespace_decls`. Each has unit tests.
+      - Promote `xmp_buffer: Option<(String, usize)>` to `xmp_buffer: Option<CaptureNs>` with fields: `buffer`, `depth`, `root_close_byte`, `in_scope_at_start`, `declared_on_root`, `used_in_subtree`. Parallel `foreign_object_capture: Option<CaptureNs>`.
+      - Capture-start: record root open tag bytes, `root_close_byte`, snapshot in-scope namespaces, declare-on-root set, seed used-prefixes.
+      - Capture-body: add `Event::CData` and `Event::Comment` handling (previously dropped via `_ => {}`); update `used_in_subtree` on every Start/Empty.
+      - Capture-finalise: compute `to_inject = used − declared_on_root`, look up URIs from `in_scope_at_start`, splice via `inject_namespace_decls` at `root_close_byte`, push patched packet.
+    - **Phase 4 — tests.**
+      - `test_xmp_namespace_inheritance_captures_inherited_xmlns` — `xmlns:x/rdf/dc` on `<fo:root>` only; assert injected on captured root.
+      - `test_xmp_well_formed_via_ns_reader` — feed captured packet to `quick_xml::NsReader`; any `ResolveResult::Unknown` fails.
+      - `test_namespace_scope_pop_restores_outer` and `test_namespace_scope_sibling_rebind_does_not_leak` (parser unit).
+      - `test_foreign_object_inherits_xmlns_svg` — SVG with inherited `xmlns:svg`.
+      - `test_xmp_capture_round_trips_cdata` and `test_xmp_capture_round_trips_comment`.
+      - `test_xmlns_inject_self_closing_root` (xmlns helper unit).
+      - `test_issue_1_namespace_inheritance_pdf_roundtrip` (integration).
+  - **Files:**
+    - `crates/fop-core/src/xml/parser.rs` — `NamespaceScope` struct; replace `namespace_map`; new scope methods; update `extract_name`; delete `update_namespaces`.
+    - `crates/fop-core/src/tree/builder/mod.rs` — loop-top push/pop; remove 3 legacy calls; promote capture state to `CaptureNs`; CData/Comment append; finalize injection.
+    - `crates/fop-core/src/tree/builder/xmlns.rs` (NEW) — pure helpers + unit tests.
+    - `crates/fop-core/src/tree/builder.rs` or `mod.rs` — `mod xmlns;` line.
+    - `tests/integration/regression_tests.rs` — `test_issue_1_namespace_inheritance_pdf_roundtrip`.
+  - **Tests:** see Phase 4. Acceptance: `test_xmp_well_formed_via_ns_reader` passes for the inherited-xmlns shape; 3024 existing tests stay green.
+  - **Risk:**
+    - *Behavioural change in `extract_name`.* Strictly lexical scope now — correctness improvement but a test accidentally relying on the old leak would fail. Full 3024-test sweep is the mitigation.
+    - *Push/pop symmetry.* `expand_empty_elements=true` should make `Event::Empty` unreachable; guard it defensively anyway.
+    - *Capture-start timing.* Push happens loop-top before dispatch, so the root's own `xmlns:` decls are already on the stack when snapshot is taken at capture-start.
+    - *Sibling-prefix-rebinding leak.* Old flat `namespace_map` silently mutated; `test_namespace_scope_sibling_rebind_does_not_leak` is the new guard.
+- [x] Escape `/Info` string values in `PdfDocument::to_bytes()` (`crates/fop-render/src/pdf/document/mod.rs`) — applied `escape_pdf_string` to `/Title`, `/Author`, `/Subject`, `/CreationDate` in the trailer write path; added `test_info_escapes_parentheses_in_title` (done 2026-05-16).
+- [x] Extend `extract_dc_fields` (`crates/fop-render/src/pdf/compliance.rs`) to extract `dc:date`, `dc:rights`, `dc:language` — added three fields to `DcFields`, extraction calls, and unit tests (done 2026-05-16).
+- [ ] Refactor `write_minimal_pdf` away by teaching `PdfDocument::to_bytes()` to handle multiple Type1 builtin fonts — removes ~120 lines of duplicated serialisation in `simple.rs`; touches embedded-font/image/gradient object-ID arithmetic in `document/mod.rs`, meaningful regression surface; defer until there is a second motivation beyond aesthetics.

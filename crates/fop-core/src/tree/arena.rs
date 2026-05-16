@@ -40,6 +40,10 @@ pub struct FoArena<'a> {
     id_registry: IdRegistry,
     /// Document language from xml:lang on fo:root (e.g. "en", "ja")
     pub document_lang: Option<String>,
+    /// XMP metadata packets captured from `<fo:declarations><x:xmpmeta>` elements.
+    /// Each entry is the raw XML content of one `<x:xmpmeta>` block (including
+    /// the opening and closing `<x:xmpmeta ...>` tags).
+    pub xmp_packets: Vec<String>,
 }
 
 impl<'a> FoArena<'a> {
@@ -49,6 +53,7 @@ impl<'a> FoArena<'a> {
             nodes: Vec::new(),
             id_registry: IdRegistry::new(),
             document_lang: None,
+            xmp_packets: Vec::new(),
         }
     }
 
@@ -58,6 +63,7 @@ impl<'a> FoArena<'a> {
             nodes: Vec::with_capacity(capacity),
             id_registry: IdRegistry::new(),
             document_lang: None,
+            xmp_packets: Vec::new(),
         }
     }
 

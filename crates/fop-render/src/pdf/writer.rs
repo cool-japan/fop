@@ -1,5 +1,6 @@
 //! PDF renderer - converts area tree to PDF
 
+use super::compliance::extract_dc_fields;
 use super::document::{PdfDocument, PdfPage};
 use super::font_config::FontConfig;
 use super::image::ImageXObject;
@@ -70,6 +71,24 @@ impl PdfRenderer {
         // Set document language from fo:root xml:lang attribute
         if let Some(ref lang) = fo_tree.document_lang {
             doc.info.lang = Some(lang.clone());
+        }
+        // Bridge XMP metadata from fo:declarations <x:xmpmeta> blocks.
+        // The first packet wins; additional packets are ignored for now.
+        if let Some(xmp_packet) = fo_tree.xmp_packets.first() {
+            // Extract Dublin Core fields and sync them to the /Info dictionary
+            // (overwriting the default "FOP Generated PDF" title when a dc:title
+            // is present in the XMP so both sources stay consistent).
+            let dc = extract_dc_fields(xmp_packet);
+            if let Some(title) = dc.title {
+                doc.info.title = Some(title);
+            }
+            if let Some(creator) = dc.creator {
+                doc.info.author = Some(creator);
+            }
+            if let Some(description) = dc.description {
+                doc.info.subject = Some(description);
+            }
+            doc.set_xmp_metadata(xmp_packet.clone());
         }
         Ok(doc)
     }

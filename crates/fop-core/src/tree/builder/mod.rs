@@ -7,13 +7,33 @@
 
 mod node_factory;
 mod property_parser;
+mod xmlns;
 
 use crate::properties::PropertyList;
 use crate::tree::{FoArena, FoNode, FoNodeData, NodeId};
 use crate::xml::XmlParser;
 use crate::{FopError, Result};
 use quick_xml::events::Event;
+use std::collections::BTreeSet;
 use std::io::BufRead;
+
+/// Namespace context captured when beginning to accumulate an XMP packet or
+/// foreign-object subtree.  Tracks everything needed to inject missing `xmlns:`
+/// declarations into the captured root element.
+struct CaptureNs {
+    /// Accumulated serialised XML (starts with the root element's open tag)
+    buffer: String,
+    /// Nesting depth inside the captured subtree (0 = inside the root element)
+    depth: usize,
+    /// Byte offset of the `>` character that closes the root open tag in `buffer`
+    root_close_byte: usize,
+    /// All namespace bindings in scope at the moment the root was opened
+    in_scope_at_start: Vec<(String, String)>,
+    /// Prefixes declared directly on the captured root element
+    declared_on_root: BTreeSet<String>,
+    /// All namespace prefixes referenced anywhere in the subtree (element + attr names)
+    used_in_subtree: BTreeSet<String>,
+}
 
 /// Builder for constructing FO trees from XML
 pub struct FoTreeBuilder<'a> {
@@ -25,6 +45,16 @@ pub struct FoTreeBuilder<'a> {
     foreign_xml_buffer: String,
     /// NodeId of the instream-foreign-object node being built
     foreign_object_node: Option<NodeId>,
+    /// Nesting depth of non-FO elements outside fo:instream-foreign-object.
+    /// Tracks open tags so their matching close tags do not call end_element()
+    /// and corrupt the current_node pointer.  For example, children of
+    /// fo:declarations (e.g. x:xmpmeta / rdf:RDF) live here.
+    non_fo_depth: usize,
+    /// When non-None, we are inside an `<x:xmpmeta>` element and accumulating
+    /// the raw XML (including the root `<x:xmpmeta ...>` opening tag) into this
+    /// buffer.  The namespace context tracks which `xmlns:` declarations need
+    /// injecting when the packet is finalised.
+    xmp_buffer: Option<CaptureNs>,
 }
 
 impl<'a> FoTreeBuilder<'a> {
@@ -36,6 +66,8 @@ impl<'a> FoTreeBuilder<'a> {
             foreign_object_depth: 0,
             foreign_xml_buffer: String::new(),
             foreign_object_node: None,
+            non_fo_depth: 0,
+            xmp_buffer: None::<CaptureNs>,
         }
     }
 
@@ -46,102 +78,332 @@ impl<'a> FoTreeBuilder<'a> {
         loop {
             let event = parser.read_event()?;
 
-            // If we are inside a foreign object child element, capture raw XML
-            if self.foreign_object_depth > 0 {
-                match &event {
-                    Event::Start(start) => {
-                        parser.update_namespaces(start);
-                        let raw = std::str::from_utf8(start.as_ref())
-                            .unwrap_or("")
-                            .to_string();
-                        self.foreign_xml_buffer.push('<');
-                        self.foreign_xml_buffer.push_str(&raw);
-                        self.foreign_xml_buffer.push('>');
-                        self.foreign_object_depth += 1;
-                    }
-                    Event::Empty(start) => {
-                        parser.update_namespaces(start);
-                        let raw = std::str::from_utf8(start.as_ref())
-                            .unwrap_or("")
-                            .to_string();
-                        self.foreign_xml_buffer.push('<');
-                        self.foreign_xml_buffer.push_str(&raw);
-                        self.foreign_xml_buffer.push_str("/>");
-                    }
-                    Event::End(end) => {
-                        self.foreign_object_depth -= 1;
-                        if self.foreign_object_depth > 0 {
-                            let raw = std::str::from_utf8(end.as_ref()).unwrap_or("").to_string();
-                            self.foreign_xml_buffer.push_str("</");
-                            self.foreign_xml_buffer.push_str(&raw);
-                            self.foreign_xml_buffer.push('>');
-                        }
-                        // When depth returns to 0, the child root element is closed
-                    }
-                    Event::Text(text) => {
-                        let text_content = parser.extract_text(text).unwrap_or_default();
-                        self.foreign_xml_buffer.push_str(&text_content);
-                    }
-                    Event::Eof => break,
-                    _ => {}
+            // Push namespace scope BEFORE dispatch for Start/Empty elements.
+            // Empty elements also need push+pop since they open and close atomically.
+            match &event {
+                Event::Start(start) | Event::Empty(start) => {
+                    parser.push_namespace_scope(start);
                 }
-                continue;
+                _ => {}
             }
 
-            match event {
-                Event::Start(ref start) | Event::Empty(ref start) => {
-                    parser.update_namespaces(start);
-                    let (name, ns) = parser.extract_name(start)?;
+            // Determine whether we need to pop after dispatch.
+            // End pops; Empty pops (was pushed above); Start does NOT pop.
+            let should_pop = matches!(&event, Event::End(_) | Event::Empty(_));
 
-                    if ns.is_fo() {
-                        self.start_element(&name, start, &parser)?;
+            let result = self.dispatch_event(&event, &parser);
 
-                        // If it was an empty element, immediately close it
-                        if matches!(event, Event::Empty(_)) {
-                            self.end_element()?;
-                        }
-                    } else if self.foreign_object_node.is_some() {
-                        // Non-FO element inside instream-foreign-object: capture as raw XML
-                        let raw = std::str::from_utf8(start.as_ref())
-                            .unwrap_or("")
-                            .to_string();
-                        self.foreign_xml_buffer.push('<');
-                        self.foreign_xml_buffer.push_str(&raw);
-                        if matches!(event, Event::Empty(_)) {
-                            self.foreign_xml_buffer.push_str("/>");
-                        } else {
-                            self.foreign_xml_buffer.push('>');
-                            self.foreign_object_depth += 1;
-                        }
-                    }
-                }
-                Event::End(_) => {
-                    if self.foreign_object_node.is_some() && self.foreign_object_depth == 0 {
-                        // This End event closes the fo:instream-foreign-object itself
-                        self.finalize_foreign_object();
-                    }
-                    self.end_element()?;
-                }
-                Event::Text(text) => {
-                    let text_content = parser.extract_text(&text)?;
-                    let trimmed = text_content.trim();
-                    if !trimmed.is_empty() {
-                        self.add_text(trimmed)?;
-                    }
-                }
-                Event::CData(cdata) => {
-                    // CDATA sections preserve content exactly
-                    let cdata_content = parser.extract_cdata(&cdata)?;
-                    if !cdata_content.is_empty() {
-                        self.add_text(&cdata_content)?;
-                    }
-                }
-                Event::Eof => break,
-                _ => {}
+            // Pop AFTER dispatch so the capture finaliser sees the correct scope on End.
+            if should_pop {
+                parser.pop_namespace_scope();
+            }
+
+            // Propagate any error from dispatch_event
+            result?;
+
+            if matches!(&event, Event::Eof) {
+                break;
             }
         }
 
         Ok(self.arena)
+    }
+
+    /// Dispatch a single parse event to the appropriate capture or FO handler.
+    fn dispatch_event<R: BufRead>(
+        &mut self,
+        event: &Event<'static>,
+        parser: &XmlParser<R>,
+    ) -> Result<()> {
+        // ── Block A: XMP packet capture ──────────────────────────────────────────
+        if self.xmp_buffer.is_some() {
+            return self.handle_xmp_event(event, parser);
+        }
+
+        // ── Block B: foreign-object child capture ────────────────────────────────
+        if self.foreign_object_depth > 0 {
+            return self.handle_foreign_child_event(event, parser);
+        }
+
+        // ── Block C: main FO parse ───────────────────────────────────────────────
+        match event {
+            Event::Start(start) => {
+                let (name, ns) = parser.extract_name(start)?;
+
+                if ns.is_fo() {
+                    self.start_element(&name, start, parser)?;
+                } else if self.foreign_object_node.is_some() {
+                    // Non-FO start inside instream-foreign-object root: begin child capture
+                    let raw = std::str::from_utf8(start.as_ref())
+                        .unwrap_or("")
+                        .to_string();
+                    self.foreign_xml_buffer.push('<');
+                    self.foreign_xml_buffer.push_str(&raw);
+                    self.foreign_xml_buffer.push('>');
+                    self.foreign_object_depth += 1;
+                } else {
+                    // Non-FO element outside instream-foreign-object (e.g. inside
+                    // fo:declarations).  Track depth so End events don't call end_element().
+                    self.non_fo_depth += 1;
+                    self.try_begin_xmp_capture(start, parser);
+                }
+            }
+            Event::Empty(start) => {
+                let (name, ns) = parser.extract_name(start)?;
+
+                if ns.is_fo() {
+                    self.start_element(&name, start, parser)?;
+                    self.end_element()?;
+                } else if self.foreign_object_node.is_some() {
+                    // Self-closing non-FO element inside foreign-object root
+                    let raw = std::str::from_utf8(start.as_ref())
+                        .unwrap_or("")
+                        .to_string();
+                    self.foreign_xml_buffer.push('<');
+                    self.foreign_xml_buffer.push_str(&raw);
+                    self.foreign_xml_buffer.push_str("/>");
+                }
+                // Non-FO empty element outside foreign-object: ignore (no depth change)
+            }
+            Event::End(_) => {
+                if self.foreign_object_node.is_some() && self.foreign_object_depth == 0 {
+                    // This End closes the fo:instream-foreign-object itself
+                    self.finalize_foreign_object();
+                }
+                // If inside a non-FO subtree, consume without popping current_node
+                if self.non_fo_depth > 0 {
+                    self.non_fo_depth -= 1;
+                    return Ok(());
+                }
+                self.end_element()?;
+            }
+            Event::Text(text) => {
+                let text_content = parser.extract_text(text)?;
+                let trimmed = text_content.trim();
+                if !trimmed.is_empty() {
+                    self.add_text(trimmed)?;
+                }
+            }
+            Event::CData(cdata) => {
+                let cdata_content = parser.extract_cdata(cdata)?;
+                if !cdata_content.is_empty() {
+                    self.add_text(&cdata_content)?;
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Handle an event while inside the XMP packet capture mode.
+    fn handle_xmp_event<R: BufRead>(
+        &mut self,
+        event: &Event<'static>,
+        parser: &XmlParser<R>,
+    ) -> Result<()> {
+        match event {
+            Event::Start(start) => {
+                let raw = std::str::from_utf8(start.as_ref())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(cap) = &mut self.xmp_buffer {
+                    cap.buffer.push('<');
+                    cap.buffer.push_str(&raw);
+                    cap.buffer.push('>');
+                    cap.depth += 1;
+                    xmlns::scan_prefixes_used(start, &mut cap.used_in_subtree);
+                }
+            }
+            Event::Empty(start) => {
+                let raw = std::str::from_utf8(start.as_ref())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(cap) = &mut self.xmp_buffer {
+                    cap.buffer.push('<');
+                    cap.buffer.push_str(&raw);
+                    cap.buffer.push_str("/>");
+                    xmlns::scan_prefixes_used(start, &mut cap.used_in_subtree);
+                }
+            }
+            Event::End(end) => {
+                let raw = std::str::from_utf8(end.as_ref()).unwrap_or("").to_string();
+                let depth = self.xmp_buffer.as_ref().map(|c| c.depth).unwrap_or(0);
+                if depth > 0 {
+                    if let Some(cap) = &mut self.xmp_buffer {
+                        cap.buffer.push_str("</");
+                        cap.buffer.push_str(&raw);
+                        cap.buffer.push('>');
+                        cap.depth -= 1;
+                    }
+                } else {
+                    // depth == 0: this End closes the root <x:xmpmeta>
+                    if let Some(mut cap) = self.xmp_buffer.take() {
+                        cap.buffer.push_str("</");
+                        cap.buffer.push_str(&raw);
+                        cap.buffer.push('>');
+
+                        // Compute which inherited prefixes need injecting
+                        let to_inject: Vec<(String, String)> = cap
+                            .used_in_subtree
+                            .iter()
+                            .filter(|p| !cap.declared_on_root.contains(*p))
+                            .filter_map(|p| {
+                                cap.in_scope_at_start
+                                    .iter()
+                                    .find(|(sp, _)| sp == p)
+                                    .map(|(sp, su)| (sp.clone(), su.clone()))
+                            })
+                            .collect();
+
+                        let decls_block = xmlns::render_xmlns_attrs(&to_inject);
+                        let patched = xmlns::inject_namespace_decls(
+                            &cap.buffer,
+                            &decls_block,
+                            cap.root_close_byte,
+                        );
+                        self.arena.xmp_packets.push(patched);
+                    }
+                    // The xmpmeta open tag counted as non_fo_depth +1; revert it.
+                    if self.non_fo_depth > 0 {
+                        self.non_fo_depth -= 1;
+                    }
+                }
+            }
+            Event::Text(text) => {
+                let text_content = parser.extract_text(text).unwrap_or_default();
+                if let Some(cap) = &mut self.xmp_buffer {
+                    cap.buffer.push_str(&text_content);
+                }
+            }
+            Event::CData(cdata) => {
+                let raw = std::str::from_utf8(cdata.as_ref()).unwrap_or("");
+                if let Some(cap) = &mut self.xmp_buffer {
+                    cap.buffer.push_str("<![CDATA[");
+                    cap.buffer.push_str(raw);
+                    cap.buffer.push_str("]]>");
+                }
+            }
+            Event::Comment(comment) => {
+                let raw = std::str::from_utf8(comment.as_ref()).unwrap_or("");
+                if let Some(cap) = &mut self.xmp_buffer {
+                    cap.buffer.push_str("<!--");
+                    cap.buffer.push_str(raw);
+                    cap.buffer.push_str("-->");
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle an event while inside a foreign-object child element capture.
+    fn handle_foreign_child_event<R: BufRead>(
+        &mut self,
+        event: &Event<'static>,
+        parser: &XmlParser<R>,
+    ) -> Result<()> {
+        match event {
+            Event::Start(start) => {
+                let raw = std::str::from_utf8(start.as_ref())
+                    .unwrap_or("")
+                    .to_string();
+                self.foreign_xml_buffer.push('<');
+                self.foreign_xml_buffer.push_str(&raw);
+                self.foreign_xml_buffer.push('>');
+                self.foreign_object_depth += 1;
+            }
+            Event::Empty(start) => {
+                let raw = std::str::from_utf8(start.as_ref())
+                    .unwrap_or("")
+                    .to_string();
+                self.foreign_xml_buffer.push('<');
+                self.foreign_xml_buffer.push_str(&raw);
+                self.foreign_xml_buffer.push_str("/>");
+            }
+            Event::End(end) => {
+                self.foreign_object_depth -= 1;
+                if self.foreign_object_depth > 0 {
+                    let raw = std::str::from_utf8(end.as_ref()).unwrap_or("").to_string();
+                    self.foreign_xml_buffer.push_str("</");
+                    self.foreign_xml_buffer.push_str(&raw);
+                    self.foreign_xml_buffer.push('>');
+                }
+                // When depth returns to 0 the child root element is closed; nothing more to do here
+            }
+            Event::Text(text) => {
+                let text_content = parser.extract_text(text).unwrap_or_default();
+                self.foreign_xml_buffer.push_str(&text_content);
+            }
+            Event::CData(cdata) => {
+                let raw = std::str::from_utf8(cdata.as_ref()).unwrap_or("");
+                self.foreign_xml_buffer.push_str("<![CDATA[");
+                self.foreign_xml_buffer.push_str(raw);
+                self.foreign_xml_buffer.push_str("]]>");
+            }
+            Event::Comment(comment) => {
+                let raw = std::str::from_utf8(comment.as_ref()).unwrap_or("");
+                self.foreign_xml_buffer.push_str("<!--");
+                self.foreign_xml_buffer.push_str(raw);
+                self.foreign_xml_buffer.push_str("-->");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Detect `<x:xmpmeta>` as a direct child of `fo:declarations` and start capture.
+    fn try_begin_xmp_capture<R: BufRead>(
+        &mut self,
+        start: &quick_xml::events::BytesStart<'_>,
+        parser: &XmlParser<R>,
+    ) {
+        let is_declarations_parent = self
+            .current_node
+            .and_then(|id| self.arena.get(id))
+            .map(|n| matches!(n.data, FoNodeData::Declarations))
+            .unwrap_or(false);
+
+        if !is_declarations_parent {
+            return;
+        }
+
+        let raw = std::str::from_utf8(start.as_ref())
+            .unwrap_or("")
+            .to_string();
+        // Check for xmpmeta (local-name only, after any prefix colon)
+        let local_name = raw
+            .split_once(':')
+            .map(|(_, local)| local)
+            .unwrap_or(raw.as_str());
+        // local_name may have attributes after the element name
+        let local_tag = local_name
+            .split_once(|c: char| c.is_ascii_whitespace())
+            .map(|(tag, _)| tag)
+            .unwrap_or(local_name);
+        if local_tag == "xmpmeta" {
+            let mut buf = String::new();
+            buf.push('<');
+            buf.push_str(&raw);
+            buf.push('>');
+            let root_close_byte = buf.len() - 1; // index of the final `>`
+
+            // Snapshot namespace scope (push_namespace_scope was already called
+            // for this element before dispatch_event was entered)
+            let in_scope_at_start = parser.snapshot_in_scope();
+            let declared_on_root = xmlns::declared_on_element(start);
+            let mut used_in_subtree = BTreeSet::new();
+            xmlns::scan_prefixes_used(start, &mut used_in_subtree);
+
+            self.xmp_buffer = Some(CaptureNs {
+                buffer: buf,
+                depth: 0,
+                root_close_byte,
+                in_scope_at_start,
+                declared_on_root,
+                used_in_subtree,
+            });
+        }
     }
 
     /// Finalize the foreign object: store captured XML and clear state
@@ -1226,5 +1488,282 @@ mod additional_tests {
         let cursor = Cursor::new(xml);
         let result = FoTreeBuilder::new().parse(cursor);
         assert!(result.is_ok(), "CDATA in block: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_xmp_packet_captured_from_declarations() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-width="210mm" page-height="297mm">
+      <fo:region-body margin="2cm"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:declarations>
+    <x:xmpmeta xmlns:x="adobe:ns:meta/">
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" rdf:about="">
+          <dc:title>
+            <rdf:Alt><rdf:li xml:lang="x-default">Test Invoice</rdf:li></rdf:Alt>
+          </dc:title>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>
+  </fo:declarations>
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block>Hello.</fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>"##;
+
+        let cursor = Cursor::new(xml);
+        let arena = FoTreeBuilder::new()
+            .parse(cursor)
+            .expect("FO with fo:declarations + XMP metadata should parse successfully");
+
+        // Verify the XMP packet was captured
+        assert_eq!(
+            arena.xmp_packets.len(),
+            1,
+            "Should have exactly one XMP packet captured from fo:declarations"
+        );
+
+        let packet = &arena.xmp_packets[0];
+        assert!(
+            packet.contains("xmpmeta"),
+            "XMP packet should contain the xmpmeta element: {}",
+            packet
+        );
+        assert!(
+            packet.contains("Test Invoice"),
+            "XMP packet should contain the dc:title value: {}",
+            packet
+        );
+
+        // Verify the document also has the correct page-sequence structure
+        let page_seq_count = arena
+            .iter()
+            .filter(|(_, n)| matches!(n.data, FoNodeData::PageSequence { .. }))
+            .count();
+        assert_eq!(
+            page_seq_count, 1,
+            "Document should have exactly one page-sequence"
+        );
+    }
+
+    // ===== XMP NAMESPACE INHERITANCE TESTS =====
+
+    fn make_fo_with_declarations(declarations_content: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format"
+         xmlns:x="adobe:ns:meta/"
+         xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-height="297mm" page-width="210mm">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:declarations>
+    {}
+  </fo:declarations>
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block>Hello.</fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>"#,
+            declarations_content
+        )
+    }
+
+    #[test]
+    fn test_xmp_namespace_inheritance_captures_inherited_xmlns() {
+        // xmlns:x, xmlns:rdf, xmlns:dc declared on fo:root only — NOT on x:xmpmeta
+        let fo = make_fo_with_declarations(
+            r#"<x:xmpmeta>
+      <rdf:RDF>
+        <rdf:Description rdf:about="">
+          <dc:title>
+            <rdf:Alt><rdf:li xml:lang="x-default">Test Invoice</rdf:li></rdf:Alt>
+          </dc:title>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>"#,
+        );
+
+        let cursor = Cursor::new(fo);
+        let arena = FoTreeBuilder::new()
+            .parse(cursor)
+            .expect("FO with inherited xmlns should parse");
+
+        assert_eq!(arena.xmp_packets.len(), 1, "should have one XMP packet");
+        let packet = &arena.xmp_packets[0];
+
+        // All three prefixes must be declared on the captured root
+        assert!(packet.contains("xmlns:x="), "missing xmlns:x in: {packet}");
+        assert!(
+            packet.contains("xmlns:rdf="),
+            "missing xmlns:rdf in: {packet}"
+        );
+        assert!(
+            packet.contains("xmlns:dc="),
+            "missing xmlns:dc in: {packet}"
+        );
+
+        // Must not duplicate — each prefix appears exactly once
+        assert_eq!(
+            packet.matches("xmlns:x=").count(),
+            1,
+            "xmlns:x duplicated in: {packet}"
+        );
+        assert_eq!(
+            packet.matches("xmlns:rdf=").count(),
+            1,
+            "xmlns:rdf duplicated in: {packet}"
+        );
+        assert_eq!(
+            packet.matches("xmlns:dc=").count(),
+            1,
+            "xmlns:dc duplicated in: {packet}"
+        );
+    }
+
+    #[test]
+    fn test_xmp_well_formed_via_ns_reader() {
+        // Same FO as above — after capture, feed the packet to NsReader
+        // and assert no undefined prefixes
+        let fo = make_fo_with_declarations(
+            r#"<x:xmpmeta>
+      <rdf:RDF>
+        <rdf:Description rdf:about="">
+          <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Invoice</rdf:li></rdf:Alt></dc:title>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>"#,
+        );
+
+        let cursor = Cursor::new(fo);
+        let arena = FoTreeBuilder::new()
+            .parse(cursor)
+            .expect("FO with inherited xmlns should parse");
+
+        let packet = &arena.xmp_packets[0];
+
+        use quick_xml::name::ResolveResult;
+        use quick_xml::NsReader;
+        let mut ns_reader = NsReader::from_str(packet);
+        ns_reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        loop {
+            match ns_reader.read_resolved_event_into(&mut buf) {
+                Ok((ResolveResult::Unknown(prefix), _)) => {
+                    panic!(
+                        "undefined prefix in captured XMP packet: {:?}",
+                        std::str::from_utf8(&prefix)
+                    );
+                }
+                Ok((_, quick_xml::events::Event::Eof)) => break,
+                Ok(_) => {}
+                Err(e) => panic!("parse error in captured XMP packet: {e}"),
+            }
+            buf.clear();
+        }
+    }
+
+    #[test]
+    fn test_xmp_capture_round_trips_cdata() {
+        // xmlns:x and xmlns:rdf declared on xmpmeta directly (no inheritance needed)
+        let fo = make_fo_with_declarations(
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:RDF><![CDATA[<not-an-element/>]]></rdf:RDF>
+    </x:xmpmeta>"#,
+        );
+
+        let cursor = Cursor::new(fo);
+        let arena = FoTreeBuilder::new()
+            .parse(cursor)
+            .expect("FO with CDATA in XMP should parse");
+
+        assert_eq!(arena.xmp_packets.len(), 1);
+        assert!(
+            arena.xmp_packets[0].contains("<![CDATA[<not-an-element/>]]>"),
+            "CDATA dropped: {}",
+            arena.xmp_packets[0]
+        );
+    }
+
+    #[test]
+    fn test_xmp_capture_round_trips_comment() {
+        let fo = make_fo_with_declarations(
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <!-- intentional comment -->
+      <rdf:RDF/>
+    </x:xmpmeta>"#,
+        );
+
+        let cursor = Cursor::new(fo);
+        let arena = FoTreeBuilder::new()
+            .parse(cursor)
+            .expect("FO with comment in XMP should parse");
+
+        assert_eq!(arena.xmp_packets.len(), 1);
+        let packet = &arena.xmp_packets[0];
+        // Comment content should be preserved (with or without surrounding spaces depending on trim)
+        assert!(
+            packet.contains("<!-- intentional comment -->")
+                || packet.contains("<!--intentional comment-->")
+                || packet.contains("<!-- intentional comment-->")
+                || packet.contains("<!--intentional comment -->"),
+            "comment dropped: {packet}"
+        );
+    }
+
+    #[test]
+    fn test_xmp_no_injection_when_all_declared_locally() {
+        // When all prefixes are declared on the xmpmeta root itself, no injection needed.
+        // The canary test already covers this; this test makes it explicit.
+        let fo = r##"<?xml version="1.0" encoding="utf-8"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="A4" page-width="210mm" page-height="297mm">
+      <fo:region-body margin="2cm"/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:declarations>
+    <x:xmpmeta xmlns:x="adobe:ns:meta/">
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" rdf:about="">
+          <dc:title>Local Decl Test</dc:title>
+        </rdf:Description>
+      </rdf:RDF>
+    </x:xmpmeta>
+  </fo:declarations>
+  <fo:page-sequence master-reference="A4">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block>Hello.</fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>"##;
+
+        let cursor = Cursor::new(fo);
+        let arena = FoTreeBuilder::new()
+            .parse(cursor)
+            .expect("locally-declared prefixes should parse");
+
+        assert_eq!(arena.xmp_packets.len(), 1);
+        let packet = &arena.xmp_packets[0];
+        // xmlns:x is declared on the root — count must remain exactly 1 (no injection)
+        assert_eq!(
+            packet.matches("xmlns:x=").count(),
+            1,
+            "xmlns:x must appear exactly once (no double-injection): {packet}"
+        );
+        assert!(
+            packet.contains("Local Decl Test"),
+            "content preserved: {packet}"
+        );
     }
 }

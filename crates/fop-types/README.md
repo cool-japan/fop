@@ -14,7 +14,7 @@ Add `fop-types` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fop-types = "0.1.1"
+fop-types = "0.1.2"
 ```
 
 ## Types

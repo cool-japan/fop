@@ -6,7 +6,7 @@
 
 Multi-format rendering backends for the COOLJAPAN FOP ecosystem. Transforms the area tree produced by `fop-layout` into **7 output formats** across 6 renderer structs — PDF, SVG, PostScript, plain text, PNG, and JPEG — plus streaming and parallel PDF renderers for large-scale workloads.
 
-**Version:** 0.1.1 — **Released:** 2026-04-20
+**Version:** 0.1.2 — **Released:** 2026-05-16
 
 ## Installation
 

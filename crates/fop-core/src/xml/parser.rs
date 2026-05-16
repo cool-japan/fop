@@ -131,12 +131,19 @@ impl ProcessingInstruction {
     }
 }
 
+/// One element's worth of namespace declarations (pushed on element open, popped on element close)
+#[derive(Debug, Default)]
+struct NamespaceScope {
+    /// `(prefix, uri)` pairs; empty-string prefix = default `xmlns`
+    decls: Vec<(String, String)>,
+}
+
 /// Wrapper around quick-xml Reader for parsing XSL-FO documents
 pub struct XmlParser<R: BufRead> {
     reader: Reader<R>,
     buf: Vec<u8>,
-    /// Namespace prefix to URI mapping
-    namespace_map: HashMap<String, String>,
+    /// Namespace scope stack — push on Start/Empty, pop on End/Empty
+    namespace_stack: Vec<NamespaceScope>,
     /// Entity resolver
     entity_resolver: EntityResolver,
     /// Processing instructions encountered
@@ -153,7 +160,7 @@ impl<R: BufRead> XmlParser<R> {
         Self {
             reader: xml_reader,
             buf: Vec::new(),
-            namespace_map: HashMap::new(),
+            namespace_stack: Vec::new(),
             entity_resolver: EntityResolver::new(),
             processing_instructions: Vec::new(),
         }
@@ -223,26 +230,60 @@ impl<R: BufRead> XmlParser<R> {
         Ok(event)
     }
 
-    /// Update namespace map from element attributes
-    pub fn update_namespaces(&mut self, start: &BytesStart) {
-        for attr in start.attributes().flatten() {
-            if let Ok(key) = std::str::from_utf8(attr.key.as_ref()) {
-                if key.starts_with("xmlns") && key != "xmlns" {
-                    if let Some(prefix) = key.strip_prefix("xmlns:") {
-                        if let Ok(value) = attr.decode_and_unescape_value(self.reader.decoder()) {
-                            // Prefixed namespace
-                            self.namespace_map
-                                .insert(prefix.to_string(), value.to_string());
-                        }
-                    }
-                } else if key == "xmlns" {
-                    if let Ok(value) = attr.decode_and_unescape_value(self.reader.decoder()) {
-                        // Default namespace
-                        self.namespace_map.insert(String::new(), value.to_string());
-                    }
+    /// Push a new namespace scope parsed from the element's `xmlns`/`xmlns:*` attributes.
+    /// Call this when entering a Start or Empty element.
+    pub fn push_namespace_scope(&mut self, start: &BytesStart<'_>) {
+        let mut scope = NamespaceScope::default();
+        for attr in start.attributes().with_checks(false).flatten() {
+            let key = match std::str::from_utf8(attr.key.as_ref()) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            if key == "xmlns" {
+                if let Ok(uri) = attr.decode_and_unescape_value(self.reader.decoder()) {
+                    scope.decls.push((String::new(), uri.into_owned()));
+                }
+            } else if let Some(suffix) = key.strip_prefix("xmlns:") {
+                if let Ok(uri) = attr.decode_and_unescape_value(self.reader.decoder()) {
+                    scope.decls.push((suffix.to_string(), uri.into_owned()));
                 }
             }
         }
+        self.namespace_stack.push(scope);
+    }
+
+    /// Pop the innermost namespace scope.  No-op if the stack is empty.
+    pub fn pop_namespace_scope(&mut self) {
+        self.namespace_stack.pop();
+    }
+
+    /// Resolve a namespace prefix to a URI, searching from innermost scope outward.
+    /// Returns `None` if the prefix is not in scope.
+    pub fn resolve_prefix<'a>(&'a self, prefix: &str) -> Option<&'a str> {
+        for scope in self.namespace_stack.iter().rev() {
+            for (p, uri) in &scope.decls {
+                if p == prefix {
+                    return Some(uri.as_str());
+                }
+            }
+        }
+        None
+    }
+
+    /// Return all namespaces currently in scope as `(prefix, uri)` pairs,
+    /// with innermost bindings winning over outer ones.  Sorted by prefix
+    /// for determinism.  Empty string prefix = default namespace.
+    pub fn snapshot_in_scope(&self) -> Vec<(String, String)> {
+        let mut map: HashMap<String, String> = HashMap::new();
+        // Iterate outer→inner so inner overwrites outer (innermost binding wins)
+        for scope in self.namespace_stack.iter() {
+            for (prefix, uri) in &scope.decls {
+                map.insert(prefix.clone(), uri.clone());
+            }
+        }
+        let mut result: Vec<(String, String)> = map.into_iter().collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
     }
 
     /// Extract element name and namespace from a BytesStart event
@@ -279,11 +320,15 @@ impl<R: BufRead> XmlParser<R> {
             (None, local)
         };
 
-        // Look up namespace URI from namespace map
+        // Look up namespace URI via scope stack
         let ns_uri = if let Some(ref prefix) = ns_prefix {
-            self.namespace_map.get(prefix).cloned().unwrap_or_default()
+            self.resolve_prefix(prefix)
+                .map(str::to_string)
+                .unwrap_or_default()
         } else {
-            self.namespace_map.get("").cloned().unwrap_or_default()
+            self.resolve_prefix("")
+                .map(str::to_string)
+                .unwrap_or_default()
         };
 
         let namespace = Namespace::from_uri(&ns_uri);
@@ -383,7 +428,7 @@ mod tests {
             let event = parser.read_event();
             match event {
                 Ok(Event::Start(ref start)) | Ok(Event::Empty(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     let (name, ns) = parser.extract_name(start).expect("test: should succeed");
 
                     if name == "root" && ns.is_fo() {
@@ -419,7 +464,7 @@ mod tests {
             let event = parser.read_event();
             match event {
                 Ok(Event::Start(ref start)) | Ok(Event::Empty(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     let attrs = parser
                         .extract_attributes(start)
                         .expect("test: should succeed");
@@ -638,7 +683,7 @@ mod tests {
         loop {
             match parser.read_event() {
                 Ok(Event::Start(ref start)) | Ok(Event::Empty(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     let attrs = parser
                         .extract_attributes(start)
                         .expect("test: should succeed");
@@ -993,7 +1038,7 @@ mod additional_tests {
             let event = parser.read_event();
             match event {
                 Ok(Event::Start(ref start)) | Ok(Event::Empty(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     let result = parser.extract_name(start);
                     if let Ok((name, ns)) = result {
                         if name == "root" && ns.is_fo() {
@@ -1025,7 +1070,7 @@ mod additional_tests {
             let event = parser.read_event();
             match event {
                 Ok(Event::Start(ref start)) | Ok(Event::Empty(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     if let Ok((name, ns)) = parser.extract_name(start) {
                         if name == "root" && ns.is_fo() {
                             found_root = true;
@@ -1061,7 +1106,7 @@ mod additional_tests {
         loop {
             match parser.read_event() {
                 Ok(Event::Start(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     element_count += 1;
                 }
                 Ok(Event::Eof) => break,
@@ -1088,7 +1133,7 @@ mod additional_tests {
         loop {
             match parser.read_event() {
                 Ok(Event::Start(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     let attrs = parser
                         .extract_attributes(start)
                         .expect("test: should succeed");
@@ -1227,7 +1272,7 @@ mod additional_tests {
         loop {
             match parser.read_event() {
                 Ok(Event::Start(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     let attrs = parser
                         .extract_attributes(start)
                         .expect("test: should succeed");
@@ -1256,7 +1301,7 @@ mod additional_tests {
         loop {
             match parser.read_event() {
                 Ok(Event::Start(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     let attrs = parser
                         .extract_attributes(start)
                         .expect("test: should succeed");
@@ -1285,7 +1330,7 @@ mod additional_tests {
         loop {
             match parser.read_event() {
                 Ok(Event::Start(ref start)) => {
-                    parser.update_namespaces(start);
+                    parser.push_namespace_scope(start);
                     let attrs = parser
                         .extract_attributes(start)
                         .expect("test: should succeed");
@@ -1504,5 +1549,107 @@ mod additional_tests {
         // Non-decimal characters after #
         let result = resolver.resolve("#abc", location);
         assert!(result.is_err());
+    }
+
+    // ===== NAMESPACE SCOPE STACK TESTS =====
+
+    #[test]
+    fn test_namespace_scope_pop_restores_outer() {
+        let xml = r#"<root xmlns:x="uri:outer"></root>"#;
+        let cursor = Cursor::new(xml);
+        let mut parser = XmlParser::new(cursor);
+
+        // Manually push scopes to test push/pop semantics
+        let outer_start = BytesStart::from_content(r#"root xmlns:x="uri:outer""#, 4);
+        let inner_start = BytesStart::from_content(r#"child xmlns:x="uri:inner""#, 5);
+        parser.push_namespace_scope(&outer_start);
+        parser.push_namespace_scope(&inner_start);
+        assert_eq!(
+            parser.resolve_prefix("x"),
+            Some("uri:inner"),
+            "inner scope should shadow outer"
+        );
+        parser.pop_namespace_scope();
+        assert_eq!(
+            parser.resolve_prefix("x"),
+            Some("uri:outer"),
+            "after pop, outer scope should be visible"
+        );
+        parser.pop_namespace_scope();
+        assert_eq!(
+            parser.resolve_prefix("x"),
+            None,
+            "after all pops, prefix should be unresolvable"
+        );
+    }
+
+    #[test]
+    fn test_namespace_scope_sibling_rebind_does_not_leak() {
+        let xml = r#"<root></root>"#;
+        let cursor = Cursor::new(xml);
+        let mut parser = XmlParser::new(cursor);
+
+        let sibling_a = BytesStart::from_content(r#"a xmlns:foo="uri:a""#, 1);
+        parser.push_namespace_scope(&sibling_a);
+        assert_eq!(parser.resolve_prefix("foo"), Some("uri:a"));
+        parser.pop_namespace_scope();
+
+        // Sibling B has no xmlns:foo — must not inherit A's declaration
+        let sibling_b = BytesStart::from_content(r#"b"#, 1);
+        parser.push_namespace_scope(&sibling_b);
+        assert_eq!(
+            parser.resolve_prefix("foo"),
+            None,
+            "sibling's xmlns:foo must not be visible after pop"
+        );
+        parser.pop_namespace_scope();
+    }
+
+    #[test]
+    fn test_namespace_snapshot_in_scope_innermost_wins() {
+        let xml = r#"<root></root>"#;
+        let cursor = Cursor::new(xml);
+        let mut parser = XmlParser::new(cursor);
+
+        let outer = BytesStart::from_content(r#"outer xmlns:x="outer:uri""#, 5);
+        let inner = BytesStart::from_content(r#"inner xmlns:x="inner:uri""#, 5);
+        parser.push_namespace_scope(&outer);
+        parser.push_namespace_scope(&inner);
+
+        let snapshot = parser.snapshot_in_scope();
+        let x_uri = snapshot
+            .iter()
+            .find(|(p, _)| p == "x")
+            .map(|(_, u)| u.as_str());
+        assert_eq!(
+            x_uri,
+            Some("inner:uri"),
+            "innermost binding should win in snapshot"
+        );
+    }
+
+    #[test]
+    fn test_namespace_scope_empty_prefix_default_namespace() {
+        let xml = r#"<root></root>"#;
+        let cursor = Cursor::new(xml);
+        let mut parser = XmlParser::new(cursor);
+
+        let start = BytesStart::from_content(r#"root xmlns="http://example.com/""#, 4);
+        parser.push_namespace_scope(&start);
+        assert_eq!(
+            parser.resolve_prefix(""),
+            Some("http://example.com/"),
+            "default namespace should be resolvable via empty-string prefix"
+        );
+        parser.pop_namespace_scope();
+    }
+
+    #[test]
+    fn test_namespace_resolve_prefix_returns_none_on_empty_stack() {
+        let xml = r#"<root></root>"#;
+        let cursor = Cursor::new(xml);
+        let parser = XmlParser::new(cursor);
+        assert_eq!(parser.resolve_prefix("fo"), None);
+        assert_eq!(parser.resolve_prefix(""), None);
     }
 }

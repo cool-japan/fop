@@ -41,3 +41,7 @@
 - [x] Remove `#![allow(dead_code)]` when APIs stabilize
 - [x] Add fuzzing targets for XML parsing robustness
 - [x] Add conformance tests from W3C XSL-FO test suite (75 conformance tests)
+
+## XMP Metadata Embedding
+
+- [x] See root `TODO.md` → **XMP Metadata Embedding (Issue #1 follow-up)** for the full plan (Phase A: `arena.rs` + `builder/mod.rs` capture logic).
