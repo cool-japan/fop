@@ -4,14 +4,180 @@
 //! `fo:table-row`, `fo:table-cell`, and `fo:footnote` elements.
 
 use crate::area::{Area, AreaTree, AreaType, TraitSet};
-use crate::layout::PageNumberResolver;
-use fop_core::{FoArena, FoNodeData, NodeId, PropertyId};
+use crate::layout::{
+    BorderCollapse, ColumnWidth, PageNumberResolver, TableLayout, TableLayoutMode,
+};
+use fop_core::{FoArena, FoNodeData, NodeId, PropertyId, PropertyList};
 use fop_types::{Color, Length, Point, Rect, Result, Size};
 
 use super::LayoutEngine;
 
 impl LayoutEngine {
-    /// Layout a complete table with header, body, and footer sections
+    /// Lay out an `fo:table` node: resolve the table-layout/border model, compute
+    /// the column widths, create the outer table area, and place every section.
+    ///
+    /// This is the single entry point shared by both dispatch routes:
+    /// * `layout_node` (tables under fo:root / fo:block-container), and
+    /// * `layout_block` (tables that are direct children of an fo:flow),
+    ///
+    /// so a table renders identically wherever it appears.  `available_width` is
+    /// the table's inline-progression-dimension and `y_offset` is its block-start
+    /// position within `parent_area` (the flow stacks tables like blocks; the
+    /// layout_node route passes `0`).  Returns the outer table area id.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn layout_table_node(
+        &self,
+        fo_tree: &FoArena,
+        node_id: NodeId,
+        properties: &PropertyList,
+        area_tree: &mut AreaTree,
+        parent_area: Option<crate::area::AreaId>,
+        available_width: Length,
+        y_offset: Length,
+        resolver: &mut PageNumberResolver,
+    ) -> Result<Option<crate::area::AreaId>> {
+        // Resolve table-layout (EN_AUTO = 9, EN_FIXED = 51); default fixed.
+        let layout_mode = if let Ok(prop) = properties.get(PropertyId::TableLayout) {
+            if let Some(enum_val) = prop.as_enum() {
+                if enum_val == 9 {
+                    TableLayoutMode::Auto
+                } else {
+                    TableLayoutMode::Fixed
+                }
+            } else if prop.is_auto() {
+                TableLayoutMode::Auto
+            } else {
+                TableLayoutMode::Fixed
+            }
+        } else {
+            TableLayoutMode::Fixed
+        };
+
+        // Resolve border-collapse (EN_COLLAPSE = 28); default separate.
+        let border_collapse = if let Ok(prop) = properties.get(PropertyId::BorderCollapse) {
+            if let Some(enum_val) = prop.as_enum() {
+                if enum_val == 28 {
+                    BorderCollapse::Collapse
+                } else {
+                    BorderCollapse::Separate
+                }
+            } else if let Some(string_val) = prop.as_string() {
+                if string_val == "collapse" {
+                    BorderCollapse::Collapse
+                } else {
+                    BorderCollapse::Separate
+                }
+            } else {
+                BorderCollapse::Separate
+            }
+        } else {
+            BorderCollapse::Separate
+        };
+
+        // border-spacing only affects the separate model; default 0pt per spec.
+        let border_spacing = if let Ok(prop) = properties.get(PropertyId::BorderSpacing) {
+            prop.as_length().unwrap_or(Length::from_pt(0.0))
+        } else {
+            Length::from_pt(0.0)
+        };
+
+        let table_layout = TableLayout::new(available_width)
+            .with_border_spacing(border_spacing)
+            .with_layout_mode(layout_mode)
+            .with_border_collapse(border_collapse);
+
+        // Gather the declared column specs (in document order) and the sections.
+        let mut column_specs = Vec::new();
+        let mut header_id = None;
+        let mut footer_id = None;
+        let mut body_ids = Vec::new();
+
+        for child_id in fo_tree.children(node_id) {
+            if let Some(child) = fo_tree.get(child_id) {
+                match &child.data {
+                    FoNodeData::TableColumn { .. } => {
+                        if let Some(props) = child.data.properties() {
+                            if let Ok(width) = props.get(PropertyId::ColumnWidth) {
+                                if let Some(len) = width.as_length() {
+                                    column_specs.push(ColumnWidth::Fixed(len));
+                                } else if width.is_auto() {
+                                    column_specs.push(ColumnWidth::Auto);
+                                }
+                            } else {
+                                column_specs.push(ColumnWidth::Auto);
+                            }
+                        }
+                    }
+                    FoNodeData::TableHeader { .. } => header_id = Some(child_id),
+                    FoNodeData::TableFooter { .. } => footer_id = Some(child_id),
+                    FoNodeData::TableBody { .. } => body_ids.push(child_id),
+                    _ => {}
+                }
+            }
+        }
+
+        // Compute the final column widths per the resolved layout mode.
+        let computed_widths = match layout_mode {
+            TableLayoutMode::Fixed => {
+                // Fixed layout is unchanged: undeclared tables collapse to a single
+                // proportional column that fills the available width.
+                let specs = if column_specs.is_empty() {
+                    vec![ColumnWidth::Proportional(1.0)]
+                } else {
+                    column_specs.clone()
+                };
+                table_layout.compute_fixed_widths(&specs)
+            }
+            TableLayoutMode::Auto => {
+                // Auto layout measures real cell content (GAP 1).  Undeclared
+                // columns are treated as auto and sized from the cells themselves.
+                self.measure_auto_column_widths(fo_tree, node_id, &column_specs, &table_layout)
+            }
+        };
+
+        // Create the outer table area (zero-height placeholder; the real height is
+        // computed by layout_table and written back below).
+        let table_rect = Rect::new(Length::ZERO, y_offset, available_width, Length::ZERO);
+
+        let mut traits = TraitSet::default();
+        if let Ok(color) = properties.get(PropertyId::BackgroundColor) {
+            traits.background_color = color.as_color();
+        }
+
+        let area = Area::new(AreaType::Block, table_rect).with_traits(traits);
+        let table_id = area_tree.add_area(area);
+
+        if let Some(parent) = parent_area {
+            area_tree
+                .append_child(parent, table_id)
+                .map_err(fop_types::FopError::Generic)?;
+        }
+
+        // layout_table returns the real total height (sum of all section/row
+        // heights); write it back so stacking / float-clear / pagination see the
+        // correct bounding box.
+        let real_table_height = self.layout_table(
+            fo_tree,
+            area_tree,
+            table_id,
+            header_id,
+            footer_id,
+            &body_ids,
+            &computed_widths,
+            resolver,
+        )?;
+
+        if let Some(table_area_node) = area_tree.get_mut(table_id) {
+            table_area_node.area.geometry.height = real_table_height;
+        }
+
+        Ok(Some(table_id))
+    }
+
+    /// Layout a complete table with header, body, and footer sections.
+    ///
+    /// Returns the total height of the table (sum of all section heights), which
+    /// the caller must use to update the outer table area's `geometry.height`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn layout_table(
         &self,
@@ -23,12 +189,15 @@ impl LayoutEngine {
         body_ids: &[NodeId],
         column_widths: &[Length],
         resolver: &mut PageNumberResolver,
-    ) -> Result<()> {
+    ) -> Result<Length> {
         let mut current_y = Length::ZERO;
 
         // Layout header once and cache the areas
         let header_areas = if let Some(hid) = header_id {
-            let header_height = self.layout_table_section(
+            // layout_table_section returns the absolute y-position after all header rows,
+            // starting from current_y (= 0).  That value equals the header's total height
+            // when current_y starts at zero.
+            let header_end_y = self.layout_table_section(
                 fo_tree,
                 hid,
                 area_tree,
@@ -37,7 +206,7 @@ impl LayoutEngine {
                 column_widths,
                 resolver,
             )?;
-            current_y += header_height;
+            current_y = header_end_y;
 
             // Collect header area IDs for potential repetition
             let children = area_tree.children(table_id);
@@ -46,7 +215,7 @@ impl LayoutEngine {
             Vec::new()
         };
 
-        // Layout all body sections
+        // Layout all body sections; each call advances current_y to the end of that section.
         for body_id in body_ids {
             current_y = self.layout_table_section(
                 fo_tree,
@@ -59,9 +228,9 @@ impl LayoutEngine {
             )?;
         }
 
-        // Layout footer once and cache the areas
+        // Layout footer and include its rows in the total height.
         if let Some(fid) = footer_id {
-            let _footer_height = self.layout_table_section(
+            current_y = self.layout_table_section(
                 fo_tree,
                 fid,
                 area_tree,
@@ -82,7 +251,10 @@ impl LayoutEngine {
         // Store header areas for page breaking (future enhancement)
         let _ = header_areas; // Suppress unused warning
 
-        Ok(())
+        // current_y is now the absolute y-coordinate of the bottom edge of the last
+        // row in the table (measured from the table's own origin at y = 0), which is
+        // exactly the real height of the table.
+        Ok(current_y)
     }
 
     /// Layout a table section (header, body, or footer)
@@ -409,6 +581,7 @@ impl LayoutEngine {
         line_height: Length,
         parent_traits: &TraitSet,
         first_line_indent: Length,
+        y_offset: Length,
         resolver: &mut PageNumberResolver,
     ) -> Result<()> {
         let children = fo_tree.children(footnote_node_id);
@@ -442,6 +615,7 @@ impl LayoutEngine {
                 line_height,
                 parent_traits,
                 first_line_indent,
+                y_offset,
             )?;
         }
 

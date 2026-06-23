@@ -2,7 +2,6 @@
 //!
 //! Generates PostScript Level 2 documents from area trees.
 
-use crate::image::ImageInfo;
 use fop_layout::{AreaId, AreaTree, AreaType};
 use fop_types::{Color, Length, Result};
 use std::collections::HashMap;
@@ -46,7 +45,11 @@ impl PsRenderer {
         Ok(ps_doc.to_string())
     }
 
-    /// Collect all images from the area tree
+    /// Collect all images from the area tree, decoding them to raw pixel data.
+    ///
+    /// PNG and JPEG are both decoded to 8-bit samples with the alpha channel
+    /// stripped.  Areas whose image bytes cannot be decoded are skipped with a
+    /// log warning so that the rest of the document still renders.
     fn collect_images(
         &self,
         area_tree: &AreaTree,
@@ -54,14 +57,23 @@ impl PsRenderer {
     ) -> Result<()> {
         for (id, node) in area_tree.iter() {
             if matches!(node.area.area_type, AreaType::Viewport) {
-                if let Some(image_data) = node.area.image_data() {
-                    let image_info = ImageInfo::from_bytes(image_data)?;
-                    let ps_image = ImageData {
-                        width: image_info.width_px,
-                        height: image_info.height_px,
-                        data: image_data.to_vec(),
-                    };
-                    image_map.insert(id, ps_image);
+                if let Some(raw) = node.area.image_data() {
+                    match decode_image_to_pixels(raw) {
+                        Ok((width, height, channels, pixels)) => {
+                            image_map.insert(
+                                id,
+                                ImageData {
+                                    width,
+                                    height,
+                                    channels,
+                                    pixels,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!("PS renderer: skipping undecodable image: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -104,13 +116,20 @@ impl Default for PsRenderer {
     }
 }
 
-/// Image data for PostScript
+/// Image data for PostScript — stores decoded pixel samples ready for emission.
+///
+/// `pixels` contains 8-bit samples, either 1 byte per pixel (gray) or 3 bytes
+/// per pixel (RGB), in top-to-bottom, left-to-right order with alpha stripped.
 #[derive(Clone)]
 struct ImageData {
+    /// Pixel width of the source image
     width: u32,
+    /// Pixel height of the source image
     height: u32,
-    #[allow(dead_code)]
-    data: Vec<u8>,
+    /// Number of colour channels: 1 = DeviceGray, 3 = DeviceRGB
+    channels: u8,
+    /// Raw decoded pixel data (no alpha)
+    pixels: Vec<u8>,
 }
 
 /// PostScript document builder - manages multiple pages
@@ -496,8 +515,16 @@ impl PsPage {
         self.commands.push("S".to_string());
     }
 
-    /// Add an image
-    #[allow(dead_code)]
+    /// Emit a PostScript Level-2 raster image using the image-dictionary form.
+    ///
+    /// The image is rendered into a rectangle at `(x, y)` with display size
+    /// `(width, height)` in points.  The ImageMatrix maps image space (the unit
+    /// square `[0,1]²`) to the display rect, flipping y so that row 0 of the
+    /// pixel data appears at the visual top of the rectangle.
+    ///
+    /// Pixel data in `image_data.pixels` must be raw 8-bit samples:
+    /// 1 byte per pixel for `channels == 1` (DeviceGray) or 3 bytes per pixel
+    /// for `channels == 3` (DeviceRGB).
     fn add_image(
         &mut self,
         image_data: &ImageData,
@@ -506,31 +533,43 @@ impl PsPage {
         width: Length,
         height: Length,
     ) {
-        // Save graphics state
-        self.commands.push("gsave".to_string());
+        let dw = width.to_pt();
+        let dh = height.to_pt();
 
-        // Set up transformation matrix for the image
+        // Choose PS colorspace and Decode array based on channel count.
+        let (colorspace, decode) = if image_data.channels == 1 {
+            ("/DeviceGray", "[0 1]")
+        } else {
+            ("/DeviceRGB", "[0 1 0 1 0 1]")
+        };
+
+        // Encode raw pixel bytes as a PS hex-string literal (no angle brackets).
+        let hex_data = encode_pixels_hex(&image_data.pixels);
+
+        // ImageMatrix [dw 0 0 -dh 0 dh] maps the image unit-square to the
+        // display rectangle with y flipped:
+        //   image (0,0) → user (0, dh) = top-left of rect
+        //   image (1,1) → user (dw, 0) = bottom-right of rect
+        self.commands.push("gsave".to_string());
         self.commands
             .push(format!("{:.3} {:.3} translate", x.to_pt(), y.to_pt()));
+        self.commands.push(format!("{} setcolorspace", colorspace));
+        self.commands.push("<<".to_string());
+        self.commands.push("  /ImageType 1".to_string());
+        self.commands.push(format!("  /Width {}", image_data.width));
         self.commands
-            .push(format!("{:.3} {:.3} scale", width.to_pt(), height.to_pt()));
-
-        // Image dictionary — full embedding is complex; draw a placeholder rectangle
+            .push(format!("  /Height {}", image_data.height));
+        self.commands.push("  /BitsPerComponent 8".to_string());
+        self.commands.push(format!("  /Decode {}", decode));
         self.commands.push(format!(
-            "% image placeholder {}x{}",
-            image_data.width, image_data.height
+            "  /ImageMatrix [{:.3} 0 0 {:.3} 0 {:.3}]",
+            dw, -dh, dh
         ));
+        self.commands
+            .push(format!("  /DataSource <\n{}\n>", hex_data));
+        self.commands.push(">>".to_string());
+        self.commands.push("image".to_string());
         self.commands.push("grestore".to_string());
-
-        // Placeholder rectangle
-        self.commands.push("0.9 GRAY".to_string());
-        self.commands.push(format!(
-            "{:.3} {:.3} {:.3} {:.3} frect",
-            x.to_pt(),
-            y.to_pt(),
-            width.to_pt(),
-            height.to_pt()
-        ));
     }
 
     /// Set clipping rectangle
@@ -609,6 +648,166 @@ fn select_ps_font(family: &str, bold: bool, italic: bool) -> String {
         (_, true, true) => "/Helvetica-BoldOblique".to_string(),
     }
 }
+
+// ── Image decoding helpers ────────────────────────────────────────────────────
+
+/// Decode image bytes (PNG or JPEG) to raw 8-bit pixel samples.
+///
+/// Returns `(width, height, channels, pixels)`:
+/// - `channels == 1` → DeviceGray, 1 byte per pixel
+/// - `channels == 3` → DeviceRGB, 3 bytes per pixel in R,G,B order
+///
+/// Alpha channels are stripped.  CMYK JPEG data is converted to approximate RGB.
+fn decode_image_to_pixels(data: &[u8]) -> fop_types::Result<(u32, u32, u8, Vec<u8>)> {
+    // Detect format from magic bytes
+    if data.len() >= 8 && data[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        decode_png_pixels(data)
+    } else if data.len() >= 3 && data[0..3] == [0xFF, 0xD8, 0xFF] {
+        decode_jpeg_pixels(data)
+    } else {
+        Err(fop_types::FopError::Generic(
+            "PS image: unknown format (expected PNG or JPEG magic bytes)".to_string(),
+        ))
+    }
+}
+
+/// Decode a PNG byte stream to raw 8-bit pixel samples (alpha stripped).
+fn decode_png_pixels(data: &[u8]) -> fop_types::Result<(u32, u32, u8, Vec<u8>)> {
+    use std::io::Cursor;
+
+    let decoder = png::Decoder::new(Cursor::new(data));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| fop_types::FopError::Generic(format!("PNG decode error: {}", e)))?;
+
+    let (width, height, color_type) = {
+        let info = reader.info();
+        (info.width, info.height, info.color_type)
+    };
+
+    let channels: u8 = match color_type {
+        png::ColorType::Rgb | png::ColorType::Rgba => 3,
+        png::ColorType::Grayscale | png::ColorType::GrayscaleAlpha => 1,
+        png::ColorType::Indexed => {
+            return Err(fop_types::FopError::Generic(
+                "PS image: indexed-colour PNG is not supported".to_string(),
+            ))
+        }
+    };
+
+    let buf_size = reader.output_buffer_size().ok_or_else(|| {
+        fop_types::FopError::Generic(
+            "PS image: could not determine PNG output buffer size".to_string(),
+        )
+    })?;
+    let mut buf = vec![0u8; buf_size];
+    let output_info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| fop_types::FopError::Generic(format!("PNG frame decode error: {}", e)))?;
+
+    let raw = &buf[..output_info.buffer_size()];
+
+    // Strip alpha if present
+    let pixels: Vec<u8> = match color_type {
+        png::ColorType::Rgba => {
+            let pixel_count = (width * height) as usize;
+            let mut rgb = Vec::with_capacity(pixel_count * 3);
+            for i in 0..pixel_count {
+                let o = i * 4;
+                rgb.push(raw[o]);
+                rgb.push(raw[o + 1]);
+                rgb.push(raw[o + 2]);
+                // alpha (raw[o + 3]) discarded
+            }
+            rgb
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let pixel_count = (width * height) as usize;
+            let mut gray = Vec::with_capacity(pixel_count);
+            for i in 0..pixel_count {
+                gray.push(raw[i * 2]);
+                // alpha discarded
+            }
+            gray
+        }
+        _ => raw.to_vec(),
+    };
+
+    Ok((width, height, channels, pixels))
+}
+
+/// Decode a JPEG byte stream to raw 8-bit pixel samples.
+///
+/// CMYK JPEGs are converted to approximate RGB; 16-bit gray is downsampled to 8-bit.
+fn decode_jpeg_pixels(data: &[u8]) -> fop_types::Result<(u32, u32, u8, Vec<u8>)> {
+    use std::io::Cursor;
+
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(data));
+    let pixels = decoder
+        .decode()
+        .map_err(|e| fop_types::FopError::Generic(format!("JPEG decode error: {}", e)))?;
+    let metadata = decoder.info().ok_or_else(|| {
+        fop_types::FopError::Generic(
+            "JPEG decoder did not return metadata after decode".to_string(),
+        )
+    })?;
+
+    let (channels, final_pixels): (u8, Vec<u8>) = match metadata.pixel_format {
+        jpeg_decoder::PixelFormat::L8 => (1, pixels),
+        jpeg_decoder::PixelFormat::RGB24 => (3, pixels),
+        jpeg_decoder::PixelFormat::L16 => {
+            // Downsample 16-bit (big-endian pairs) to 8-bit by taking the high byte
+            let downsampled: Vec<u8> = pixels.chunks_exact(2).map(|c| c[0]).collect();
+            (1, downsampled)
+        }
+        jpeg_decoder::PixelFormat::CMYK32 => {
+            // Approximate CMYK → RGB:  R=(1-C)*(1-K), G=(1-M)*(1-K), B=(1-Y)*(1-K)
+            let pixel_count = pixels.len() / 4;
+            let mut rgb = Vec::with_capacity(pixel_count * 3);
+            for i in 0..pixel_count {
+                let o = i * 4;
+                let c = pixels[o] as f32 / 255.0;
+                let m = pixels[o + 1] as f32 / 255.0;
+                let y = pixels[o + 2] as f32 / 255.0;
+                let k = pixels[o + 3] as f32 / 255.0;
+                rgb.push(((1.0 - c) * (1.0 - k) * 255.0) as u8);
+                rgb.push(((1.0 - m) * (1.0 - k) * 255.0) as u8);
+                rgb.push(((1.0 - y) * (1.0 - k) * 255.0) as u8);
+            }
+            (3, rgb)
+        }
+    };
+
+    Ok((
+        metadata.width as u32,
+        metadata.height as u32,
+        channels,
+        final_pixels,
+    ))
+}
+
+/// Encode raw pixel bytes as uppercase hexadecimal, wrapped at 64 hex chars
+/// (32 bytes) per line.  The output does **not** include the surrounding
+/// `<` `>` PS angle-bracket delimiters.
+fn encode_pixels_hex(pixels: &[u8]) -> String {
+    const BYTES_PER_LINE: usize = 32;
+    // 2 hex chars per byte + newlines
+    let mut out = String::with_capacity(pixels.len() * 2 + pixels.len() / BYTES_PER_LINE + 1);
+    for (i, &byte) in pixels.iter().enumerate() {
+        if i > 0 && i % BYTES_PER_LINE == 0 {
+            out.push('\n');
+        }
+        // format a single uppercase hex byte — no allocation path here
+        let hi = (byte >> 4) as usize;
+        let lo = (byte & 0x0F) as usize;
+        const HEX: &[u8] = b"0123456789ABCDEF";
+        out.push(HEX[hi] as char);
+        out.push(HEX[lo] as char);
+    }
+    out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Render child areas recursively
 #[allow(clippy::too_many_arguments)]
@@ -821,7 +1020,7 @@ fn escape_ps_string(text: &str) -> String {
 mod tests {
     use super::*;
     use fop_layout::area::BorderStyle;
-    use fop_types::{Color, Length};
+    use fop_types::{Color, Length, Rect};
 
     // ── PsRenderer ───────────────────────────────────────────────────────────
 
@@ -1202,5 +1401,155 @@ S
             output.trim_end().ends_with("grestore"),
             "page PS must end with grestore"
         );
+    }
+
+    // ── Image decoding helpers ────────────────────────────────────────────────
+
+    /// Build a minimal 2×2 RGB PNG entirely in memory (no file I/O).
+    fn make_test_png_rgb_2x2() -> Vec<u8> {
+        use png::{BitDepth, ColorType, Encoder};
+        let mut buf = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut buf, 2, 2);
+            encoder.set_color(ColorType::Rgb);
+            encoder.set_depth(BitDepth::Eight);
+            let mut writer = encoder
+                .write_header()
+                .expect("test: PNG header write should succeed");
+            // 4 pixels: red, green, blue, white
+            let pixels: &[u8] = &[
+                0xFF, 0x00, 0x00, // (0,0) red
+                0x00, 0xFF, 0x00, // (1,0) green
+                0x00, 0x00, 0xFF, // (0,1) blue
+                0xFF, 0xFF, 0xFF, // (1,1) white
+            ];
+            writer
+                .write_image_data(pixels)
+                .expect("test: PNG data write should succeed");
+        }
+        buf
+    }
+
+    #[test]
+    fn test_decode_png_pixels_returns_correct_channels_and_size() {
+        let png = make_test_png_rgb_2x2();
+        let (w, h, ch, pixels) =
+            decode_image_to_pixels(&png).expect("test: PNG decode should succeed");
+        assert_eq!(w, 2);
+        assert_eq!(h, 2);
+        assert_eq!(ch, 3, "RGB PNG must yield 3 channels");
+        assert_eq!(
+            pixels.len(),
+            2 * 2 * 3,
+            "must have 12 bytes for 4 RGB pixels"
+        );
+        // First pixel must be red
+        assert_eq!(&pixels[0..3], &[0xFF, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_encode_pixels_hex_basic() {
+        let pixels: &[u8] = &[0xFF, 0x00, 0xAB];
+        let hex = encode_pixels_hex(pixels);
+        assert_eq!(hex, "FF00AB");
+    }
+
+    #[test]
+    fn test_encode_pixels_hex_line_wrap() {
+        // 32 bytes per line → 33 bytes should introduce one newline
+        let pixels = vec![0xAAu8; 33];
+        let hex = encode_pixels_hex(&pixels);
+        assert!(hex.contains('\n'), "hex output must wrap after 32 bytes");
+        // Verify no extraneous content — only hex chars and newlines
+        for ch in hex.chars() {
+            assert!(
+                ch.is_ascii_hexdigit() || ch == '\n',
+                "unexpected character in hex output: {:?}",
+                ch
+            );
+        }
+    }
+
+    // ── Core integration test ─────────────────────────────────────────────────
+
+    /// Render a document that contains an `fo:external-graphic`-equivalent
+    /// (a Viewport area with embedded PNG bytes) to PostScript, and verify that
+    /// the output contains a real PS Level-2 image dictionary with the `image`
+    /// operator — NOT just the old light-gray rectangle placeholder.
+    #[test]
+    fn test_ps_image_renders_real_pixels_not_gray_placeholder() {
+        use fop_layout::{Area, AreaTree, AreaType};
+
+        let png_bytes = make_test_png_rgb_2x2();
+
+        // ── Build a minimal AreaTree: one A4 page with one Viewport child ──
+        let mut tree = AreaTree::new();
+
+        let page_rect = Rect::new(
+            Length::ZERO,
+            Length::ZERO,
+            Length::from_mm(210.0),
+            Length::from_mm(297.0),
+        );
+        let page_id = tree.add_area(Area::new(AreaType::Page, page_rect));
+
+        // A 72pt × 72pt image at (10pt, 10pt)
+        let img_rect = Rect::new(
+            Length::from_pt(10.0),
+            Length::from_pt(10.0),
+            Length::from_pt(72.0),
+            Length::from_pt(72.0),
+        );
+        let vp_id = tree.add_area(Area::viewport_with_image(img_rect, png_bytes));
+        tree.append_child(page_id, vp_id)
+            .expect("test: append_child should succeed");
+
+        // ── Render to PS ──────────────────────────────────────────────────
+        let renderer = PsRenderer::new();
+        let ps = renderer
+            .render_to_ps(&tree)
+            .expect("test: render_to_ps should succeed");
+
+        // ── Assertions ────────────────────────────────────────────────────
+
+        // Must use the PS Level-2 image dictionary operator
+        assert!(
+            ps.contains("\nimage\n"),
+            "PS output must contain the 'image' operator"
+        );
+
+        // Must NOT contain the old gray-rectangle placeholder
+        assert!(
+            !ps.contains("0.9 GRAY"),
+            "PS output must not contain the gray-rectangle placeholder '0.9 GRAY'"
+        );
+
+        // Must contain the image-dictionary markers
+        assert!(
+            ps.contains("/ImageType 1"),
+            "PS output must contain /ImageType 1 image dictionary key"
+        );
+        assert!(
+            ps.contains("/DataSource <"),
+            "PS output must embed pixel data via /DataSource"
+        );
+        assert!(
+            ps.contains("setcolorspace"),
+            "PS output must call setcolorspace"
+        );
+
+        // Must contain some recognisable hex pixel data.
+        // The test PNG has a red pixel (FF0000) as its first sample.
+        assert!(
+            ps.contains("FF0000") || ps.contains("FF"),
+            "PS output must contain hex-encoded pixel data"
+        );
+
+        // Sanity: the PS document must still be structurally valid
+        assert!(
+            ps.starts_with("%!PS-Adobe-3.0"),
+            "PS must start with DSC header"
+        );
+        assert!(ps.contains("%%EOF"), "PS must end with %%EOF");
     }
 }

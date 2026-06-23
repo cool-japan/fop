@@ -1,7 +1,10 @@
 //! PDF graphics state machine
 //!
 //! Manages the graphics state stack (q/Q operators), current transformation
-//! matrix (CTM), colors, line properties, and path construction.
+//! matrix (CTM), colors, line properties, path construction, and the current
+//! clipping region.
+
+use std::sync::Arc;
 
 /// A 3×3 transformation matrix stored as [a b c d e f]
 /// | a b 0 |
@@ -110,6 +113,68 @@ pub enum LineJoin {
     Bevel,
 }
 
+/// A single clipping outline (PDF `W`/`W*`), already mapped to screen space.
+///
+/// The path stores device-independent screen-space points — i.e. the current
+/// transformation matrix and the page Y-flip have already been applied, but the
+/// DPI scale has *not*. This mirrors how [`crate::content::DrawCommand`] paths
+/// are stored, so the rasterizer applies the same DPI transform to both the
+/// painted geometry and the clip mask.
+#[derive(Debug, Clone)]
+pub struct ClipPath {
+    /// Clip outline in screen-space points (CTM applied, Y-flipped, pre-DPI).
+    pub path: tiny_skia::Path,
+    /// `true` ⇒ even-odd rule (`W*`); `false` ⇒ nonzero winding rule (`W`).
+    pub even_odd: bool,
+}
+
+/// The accumulated clipping region of a graphics state.
+///
+/// In PDF, clipping is the *intersection* of every clip path established since
+/// the page (or the enclosing `q`) began, and the clip is part of the graphics
+/// state — so `q` saves it and `Q` restores it. The outlines are kept behind an
+/// [`Arc`] so cloning a [`GraphicsState`] (on `q`) and attaching the active clip
+/// to each draw command are both O(1); a new clip is appended copy-on-write.
+#[derive(Debug, Clone, Default)]
+pub struct ClipState {
+    /// `None` ⇒ no clip (the whole page is visible). `Some` ⇒ the rendered
+    /// region is the intersection of every outline in the vector.
+    paths: Option<Arc<Vec<ClipPath>>>,
+}
+
+impl ClipState {
+    /// Returns `true` when no clip is active (the whole page is paintable).
+    pub fn is_unclipped(&self) -> bool {
+        self.paths.is_none()
+    }
+
+    /// The accumulated clip outlines whose intersection forms the region.
+    pub fn paths(&self) -> &[ClipPath] {
+        match &self.paths {
+            Some(v) => v.as_slice(),
+            None => &[],
+        }
+    }
+
+    /// Intersect a new clip outline into this region (copy-on-write).
+    pub fn intersect(&mut self, clip: ClipPath) {
+        let mut next: Vec<ClipPath> = self.paths().to_vec();
+        next.push(clip);
+        self.paths = Some(Arc::new(next));
+    }
+
+    /// Whether two clip states refer to the *same* underlying region, by
+    /// pointer identity. Used by the rasterizer to reuse a built clip mask
+    /// across consecutive draw commands without rebuilding it.
+    pub fn same_region(&self, other: &ClipState) -> bool {
+        match (&self.paths, &other.paths) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
 /// One graphics state level
 #[derive(Debug, Clone)]
 pub struct GraphicsState {
@@ -131,6 +196,9 @@ pub struct GraphicsState {
     pub dash_pattern: (Vec<f32>, f32),
     /// Text rendering mode (for clipping)
     pub text_rendering_mode: u8,
+    /// Current clipping region (intersection of `W`/`W*` outlines). Part of the
+    /// graphics state, so `q` saves it and `Q` restores it.
+    pub clip: ClipState,
 }
 
 impl Default for GraphicsState {
@@ -145,6 +213,7 @@ impl Default for GraphicsState {
             miter_limit: 10.0,
             dash_pattern: (Vec::new(), 0.0),
             text_rendering_mode: 0,
+            clip: ClipState::default(),
         }
     }
 }
@@ -613,5 +682,71 @@ mod tests {
         p.line_to(3.0, 4.0);
         p.clear();
         assert!(p.segments.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // ClipState
+    // -----------------------------------------------------------------------
+
+    fn unit_clip_path(even_odd: bool) -> ClipPath {
+        let mut pb = tiny_skia::PathBuilder::new();
+        pb.push_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, 10.0, 10.0).expect("unit rect"));
+        let path = pb.finish().expect("finished clip path");
+        ClipPath { path, even_odd }
+    }
+
+    #[test]
+    fn test_clip_state_default_is_unclipped() {
+        let c = ClipState::default();
+        assert!(c.is_unclipped(), "default clip state covers the whole page");
+        assert!(c.paths().is_empty());
+    }
+
+    #[test]
+    fn test_clip_state_intersect_adds_outline() {
+        let mut c = ClipState::default();
+        c.intersect(unit_clip_path(false));
+        assert!(!c.is_unclipped());
+        assert_eq!(c.paths().len(), 1);
+        assert!(!c.paths()[0].even_odd, "W records nonzero winding rule");
+    }
+
+    #[test]
+    fn test_clip_state_intersect_preserves_even_odd_rule() {
+        let mut c = ClipState::default();
+        c.intersect(unit_clip_path(true));
+        assert!(c.paths()[0].even_odd, "W* records even-odd rule");
+    }
+
+    #[test]
+    fn test_clip_state_clone_shares_region_identity() {
+        let mut c = ClipState::default();
+        c.intersect(unit_clip_path(false));
+        let cloned = c.clone();
+        assert!(
+            c.same_region(&cloned),
+            "a clone must share region identity (cheap O(1) q/Q save)"
+        );
+        assert!(
+            !c.same_region(&ClipState::default()),
+            "a distinct region must not compare equal"
+        );
+    }
+
+    #[test]
+    fn test_clip_state_intersect_is_copy_on_write() {
+        // Intersecting through a clone must not disturb the original region —
+        // q pushes a clone, a nested W extends only the clone, Q restores.
+        let mut base = ClipState::default();
+        base.intersect(unit_clip_path(false));
+        let mut child = base.clone();
+        child.intersect(unit_clip_path(false));
+        assert_eq!(
+            base.paths().len(),
+            1,
+            "original region is untouched by the child's intersect"
+        );
+        assert_eq!(child.paths().len(), 2);
+        assert!(!base.same_region(&child));
     }
 }

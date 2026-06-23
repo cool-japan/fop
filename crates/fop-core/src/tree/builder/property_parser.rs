@@ -363,3 +363,207 @@ pub(super) fn parse_gradient(value: &str) -> Option<fop_types::Gradient> {
 // Suppress the dead_code warning for the error type that may be unused in some code paths
 #[allow(dead_code)]
 fn _use_fop_error(_: FopError) {}
+
+#[cfg(test)]
+mod em_parser_tests {
+    use super::{parse_property_value, parse_single_value};
+    use crate::properties::{PropertyId, PropertyValue};
+    use fop_types::Percentage;
+
+    // ── parse_single_value: em values stored as Percentage ───────────────────
+
+    /// `1.5em` → `Percentage::new(1.5)` (i.e. 150 % of parent, or × 1.5).
+    #[test]
+    fn test_parse_single_value_1_5em_as_percentage() {
+        let val = parse_single_value("1.5em").expect("test: parse 1.5em");
+        match val {
+            PropertyValue::Percentage(pct) => {
+                let diff = (pct.as_fraction() - 1.5_f64).abs();
+                assert!(
+                    diff < 1e-9,
+                    "Expected fraction 1.5, got {}",
+                    pct.as_fraction()
+                );
+            }
+            other => panic!("Expected Percentage, got {:?}", other),
+        }
+    }
+
+    /// `0.8em` → `Percentage::new(0.8)`.
+    #[test]
+    fn test_parse_single_value_0_8em_as_percentage() {
+        let val = parse_single_value("0.8em").expect("test: parse 0.8em");
+        match val {
+            PropertyValue::Percentage(pct) => {
+                let diff = (pct.as_fraction() - 0.8_f64).abs();
+                assert!(
+                    diff < 1e-9,
+                    "Expected fraction 0.8, got {}",
+                    pct.as_fraction()
+                );
+            }
+            other => panic!("Expected Percentage, got {:?}", other),
+        }
+    }
+
+    /// `1em` → `Percentage::new(1.0)` (100 % of parent, or × 1.0).
+    #[test]
+    fn test_parse_single_value_1em_as_percentage() {
+        let val = parse_single_value("1em").expect("test: parse 1em");
+        match val {
+            PropertyValue::Percentage(pct) => {
+                let diff = (pct.as_fraction() - 1.0_f64).abs();
+                assert!(
+                    diff < 1e-9,
+                    "Expected fraction 1.0, got {}",
+                    pct.as_fraction()
+                );
+            }
+            other => panic!("Expected Percentage, got {:?}", other),
+        }
+    }
+
+    /// `2em` → `Percentage::new(2.0)`.
+    #[test]
+    fn test_parse_single_value_2em_as_percentage() {
+        let val = parse_single_value("2em").expect("test: parse 2em");
+        match val {
+            PropertyValue::Percentage(pct) => {
+                let diff = (pct.as_fraction() - 2.0_f64).abs();
+                assert!(
+                    diff < 1e-9,
+                    "Expected fraction 2.0, got {}",
+                    pct.as_fraction()
+                );
+            }
+            other => panic!("Expected Percentage, got {:?}", other),
+        }
+    }
+
+    /// CSS `%` values still parse as Percentage (unrelated to em).
+    #[test]
+    fn test_parse_single_value_css_percentage() {
+        let val = parse_single_value("50%").expect("test: parse 50%");
+        match val {
+            PropertyValue::Percentage(pct) => {
+                // 50% → Percentage::from_percent(50) → fraction = 0.5
+                let diff = (pct.as_fraction() - 0.5_f64).abs();
+                assert!(
+                    diff < 1e-9,
+                    "Expected fraction 0.5, got {}",
+                    pct.as_fraction()
+                );
+            }
+            other => panic!("Expected Percentage, got {:?}", other),
+        }
+    }
+
+    // ── parse_property_value: em routed through font-size property ID ────────
+
+    /// `font-size="1.5em"` → `PropertyValue::Percentage(Percentage::new(1.5))`.
+    /// This is the end-to-end parser path that triggers the bug when consumed
+    /// by `extract_font_size` without a Percentage arm.
+    #[test]
+    fn test_parse_property_value_font_size_1_5em() {
+        let val = parse_property_value(PropertyId::FontSize, "1.5em")
+            .expect("test: parse font-size=1.5em");
+        match val {
+            PropertyValue::Percentage(pct) => {
+                let diff = (pct.as_fraction() - 1.5_f64).abs();
+                assert!(
+                    diff < 1e-9,
+                    "Expected fraction 1.5, got {}",
+                    pct.as_fraction()
+                );
+            }
+            other => panic!("Expected Percentage, got {:?}", other),
+        }
+    }
+
+    /// `font-size="0.8em"` → `PropertyValue::Percentage(Percentage::new(0.8))`.
+    #[test]
+    fn test_parse_property_value_font_size_0_8em() {
+        let val = parse_property_value(PropertyId::FontSize, "0.8em")
+            .expect("test: parse font-size=0.8em");
+        match val {
+            PropertyValue::Percentage(pct) => {
+                let diff = (pct.as_fraction() - 0.8_f64).abs();
+                assert!(
+                    diff < 1e-9,
+                    "Expected fraction 0.8, got {}",
+                    pct.as_fraction()
+                );
+            }
+            other => panic!("Expected Percentage, got {:?}", other),
+        }
+    }
+
+    /// `font-size="12pt"` → still a Length (not a Percentage).
+    #[test]
+    fn test_parse_property_value_font_size_12pt_is_length() {
+        let val =
+            parse_property_value(PropertyId::FontSize, "12pt").expect("test: parse font-size=12pt");
+        assert!(
+            val.as_length().is_some(),
+            "Expected Length for 12pt, got {:?}",
+            val
+        );
+        let len = val.as_length().expect("test: length");
+        let diff = (len.to_pt() - 12.0_f64).abs();
+        assert!(diff < 0.001, "Expected 12pt, got {}pt", len.to_pt());
+    }
+
+    /// Ensure the Percentage encoding for em preserves the multiplier value
+    /// so downstream resolution `pct.of(parent)` gives the correct result.
+    #[test]
+    fn test_em_percentage_of_parent_resolves_correctly() {
+        use fop_types::Length;
+
+        let val = parse_single_value("1.5em").expect("test: parse 1.5em");
+        let pct = val.as_percentage().expect("test: as_percentage");
+
+        let parent_size = Length::from_pt(10.0);
+        let resolved = pct.of(parent_size);
+        let diff = (resolved.to_pt() - 15.0_f64).abs();
+        assert!(
+            diff < 0.001,
+            "1.5em × 10pt should resolve to 15pt, got {}pt",
+            resolved.to_pt()
+        );
+    }
+
+    /// 0.8em × 10pt = 8pt.
+    #[test]
+    fn test_em_0_8_of_10pt_resolves_to_8pt() {
+        use fop_types::Length;
+
+        let val = parse_single_value("0.8em").expect("test: parse 0.8em");
+        let pct = val.as_percentage().expect("test: as_percentage");
+
+        let parent_size = Length::from_pt(10.0);
+        let resolved = pct.of(parent_size);
+        let diff = (resolved.to_pt() - 8.0_f64).abs();
+        assert!(
+            diff < 0.001,
+            "0.8em × 10pt should resolve to 8pt, got {}pt",
+            resolved.to_pt()
+        );
+    }
+
+    // ── em does NOT produce a Length (regression guard) ──────────────────────
+
+    /// Verifies that em values are NOT stored as a fixed Length in the parser.
+    /// They must remain Percentage so that layout-time resolution is accurate.
+    #[test]
+    fn test_em_is_not_stored_as_length() {
+        let val = parse_single_value("1.5em").expect("test: parse 1.5em");
+        assert!(
+            val.as_length().is_none(),
+            "em must NOT be stored as Length (would bake in wrong 12pt default)"
+        );
+    }
+
+    // The Percentage type is used in assertions above; suppress unused-import lint.
+    #[allow(dead_code)]
+    fn _use_percentage(_: Percentage) {}
+}

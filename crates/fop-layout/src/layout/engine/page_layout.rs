@@ -4,16 +4,12 @@
 //! static-content (header/footer/sidebars), and marker collection/retrieval.
 
 use crate::area::{Area, AreaTree, AreaType, TraitSet};
-use crate::layout::{
-    extract_clear, extract_column_count, extract_column_gap, extract_traits, BlockLayoutContext,
-    PageNumberResolver,
-};
+use crate::layout::{extract_traits, BlockLayoutContext, PageNumberResolver};
 use fop_core::{FoArena, FoNodeData, NodeId, PropertyId};
 use fop_types::{Length, Point, Rect, Result, Size};
 
-use super::types::{
-    FloatInfo, FloatManager, FloatSide, MarkerMap, MultiColumnLayout, PageRegionGeometry,
-};
+use super::markers::{PageMarkerView, RetrieveBoundaryScope};
+use super::types::{FloatInfo, FloatManager, FloatSide, PageRegionGeometry};
 use super::LayoutEngine;
 
 impl LayoutEngine {
@@ -233,138 +229,6 @@ impl LayoutEngine {
             start_rect: zero_rect,
             end_rect: zero_rect,
             body_rect,
-        }
-    }
-
-    /// Layout a flow node using an explicit body rectangle.
-    ///
-    /// Called from `PageSequence` processing where the body rect is already
-    /// computed from the page master geometry.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn layout_flow_in_rect(
-        &self,
-        fo_tree: &FoArena,
-        node_id: NodeId,
-        area_tree: &mut AreaTree,
-        page_area_id: crate::area::AreaId,
-        flow_rect: Rect,
-        resolver: &mut PageNumberResolver,
-        marker_map: &mut MarkerMap,
-    ) -> Result<Option<crate::area::AreaId>> {
-        let node = fo_tree
-            .get(node_id)
-            .ok_or_else(|| fop_types::FopError::Generic(format!("Node {} not found", node_id)))?;
-
-        if let FoNodeData::Flow { properties, .. } = &node.data {
-            let mut traits = TraitSet::default();
-            if let Ok(color) = properties.get(PropertyId::Color) {
-                traits.color = color.as_color();
-            }
-
-            let area = Area::new(AreaType::Region, flow_rect).with_traits(traits);
-            let area_id = area_tree.add_area(area);
-
-            area_tree
-                .append_child(page_area_id, area_id)
-                .map_err(fop_types::FopError::Generic)?;
-
-            // Check for multi-column layout
-            let column_count = extract_column_count(properties);
-            let column_gap = extract_column_gap(properties);
-
-            let children = fo_tree.children(node_id);
-
-            if column_count > 1 {
-                let mut multi_col =
-                    MultiColumnLayout::new(column_count, column_gap, flow_rect.width)
-                        .with_max_height(flow_rect.height);
-
-                for child_id in children {
-                    self.layout_block_multicolumn(
-                        fo_tree,
-                        child_id,
-                        area_tree,
-                        area_id,
-                        &mut multi_col,
-                        resolver,
-                    )?;
-                }
-            } else {
-                // Single column layout with float support
-                let mut block_ctx = BlockLayoutContext::new(flow_rect.width);
-                let mut float_manager = FloatManager::new();
-                let is_odd_page = resolver.current_page() % 2 == 1;
-
-                for child_id in children {
-                    // Remove floats that have ended before the current Y position
-                    float_manager.remove_floats_above(block_ctx.current_y);
-
-                    // Check if this child is a float element
-                    let child_is_float = fo_tree
-                        .get(child_id)
-                        .map(|n| matches!(n.data, FoNodeData::Float { .. }))
-                        .unwrap_or(false);
-
-                    if child_is_float {
-                        // Layout the float and register it with the float manager
-                        self.layout_float_in_flow(
-                            fo_tree,
-                            child_id,
-                            area_tree,
-                            area_id,
-                            block_ctx.current_y,
-                            flow_rect.width,
-                            is_odd_page,
-                            &mut float_manager,
-                            resolver,
-                        )?;
-                    } else {
-                        // Apply `clear` property: advance past active floats if requested
-                        if let Some(child_node) = fo_tree.get(child_id) {
-                            if let Some(props) = child_node.data.properties() {
-                                let clear = extract_clear(props);
-                                block_ctx.current_y =
-                                    float_manager.get_clear_position(clear, block_ctx.current_y);
-                            }
-                        }
-
-                        // Compute available width and x-offset considering active floats
-                        let (left_offset, avail_width) =
-                            float_manager.available_width(block_ctx.current_y, flow_rect.width);
-
-                        if let Some(child_area_id) = self.layout_block_float_aware(
-                            fo_tree,
-                            child_id,
-                            area_tree,
-                            area_id,
-                            block_ctx.current_y,
-                            avail_width,
-                            left_offset,
-                            resolver,
-                        )? {
-                            if let Some(child_area) = area_tree.get(child_area_id) {
-                                block_ctx.current_y =
-                                    child_area.area.geometry.y + child_area.area.height();
-                            }
-                        }
-                    }
-                }
-
-                // Clear floats for cleanup
-                float_manager.clear();
-            }
-
-            Ok(Some(area_id))
-        } else {
-            // Fallback: route through normal layout_node
-            self.layout_node(
-                fo_tree,
-                node_id,
-                area_tree,
-                Some(page_area_id),
-                resolver,
-                marker_map,
-            )
         }
     }
 
@@ -635,7 +499,7 @@ impl LayoutEngine {
         static_rect: Rect,
         area_type: AreaType,
         resolver: &mut PageNumberResolver,
-        marker_map: &MarkerMap,
+        markers: &PageMarkerView,
     ) -> Result<Option<crate::area::AreaId>> {
         let node = fo_tree
             .get(node_id)
@@ -662,16 +526,19 @@ impl LayoutEngine {
             let mut block_ctx = BlockLayoutContext::new(static_rect.width);
 
             for child_id in children {
-                // Check if this is a retrieve-marker and handle it specially
+                // Check if this is a retrieve-marker and handle it specially:
+                // resolve it against THIS page's marker context (honouring
+                // retrieve-position and retrieve-boundary).
                 if let Some(child_node) = fo_tree.get(child_id) {
                     if let FoNodeData::RetrieveMarker {
                         retrieve_class_name,
                         retrieve_position,
-                        properties: _,
+                        properties: retrieve_props,
                     } = &child_node.data
                     {
+                        let boundary = RetrieveBoundaryScope::from_properties(retrieve_props);
                         if let Some(marker_node_id) =
-                            marker_map.retrieve_marker(retrieve_class_name, *retrieve_position)
+                            markers.resolve(retrieve_class_name, *retrieve_position, boundary)
                         {
                             self.layout_marker_content(
                                 fo_tree,
@@ -705,153 +572,6 @@ impl LayoutEngine {
             Ok(Some(area_id))
         } else {
             Ok(None)
-        }
-    }
-
-    /// Layout static content (headers and footers) - legacy fallback with hardcoded margins.
-    ///
-    /// Superseded by `layout_static_content_in_rect` which uses geometry from
-    /// the page master.  Kept as a fallback for callers that do not have page
-    /// geometry available.
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn layout_static_content(
-        &self,
-        fo_tree: &FoArena,
-        node_id: NodeId,
-        area_tree: &mut AreaTree,
-        page_area_id: crate::area::AreaId,
-        is_header: bool,
-        resolver: &mut PageNumberResolver,
-        marker_map: &MarkerMap,
-    ) -> Result<Option<crate::area::AreaId>> {
-        let node = fo_tree
-            .get(node_id)
-            .ok_or_else(|| fop_types::FopError::Generic(format!("Node {} not found", node_id)))?;
-
-        if let FoNodeData::StaticContent { properties, .. } = &node.data {
-            // Define header/footer dimensions
-            let header_height = Length::from_pt(72.0); // 1 inch
-            let footer_height = Length::from_pt(72.0); // 1 inch
-            let margin_x = Length::from_pt(72.0); // 1 inch side margins
-
-            let area_type = if is_header {
-                AreaType::Header
-            } else {
-                AreaType::Footer
-            };
-
-            let y_position = if is_header {
-                Length::ZERO
-            } else {
-                self.page_height - footer_height
-            };
-
-            let static_rect = Rect::from_point_size(
-                Point::new(margin_x, y_position),
-                Size::new(
-                    self.page_width - Length::from_pt(144.0), // 2 inches for margins
-                    if is_header {
-                        header_height
-                    } else {
-                        footer_height
-                    },
-                ),
-            );
-
-            let mut traits = TraitSet::default();
-            if let Ok(color) = properties.get(PropertyId::Color) {
-                traits.color = color.as_color();
-            }
-            if let Ok(bg_color) = properties.get(PropertyId::BackgroundColor) {
-                traits.background_color = bg_color.as_color();
-            }
-
-            let area = Area::new(area_type, static_rect).with_traits(traits);
-            let area_id = area_tree.add_area(area);
-
-            area_tree
-                .append_child(page_area_id, area_id)
-                .map_err(fop_types::FopError::Generic)?;
-
-            // Layout block children with stacking
-            let children = fo_tree.children(node_id);
-            let mut block_ctx = BlockLayoutContext::new(static_rect.width);
-
-            for child_id in children {
-                // Check if this is a retrieve-marker and handle it specially
-                if let Some(child_node) = fo_tree.get(child_id) {
-                    if let FoNodeData::RetrieveMarker {
-                        retrieve_class_name,
-                        retrieve_position,
-                        properties: _,
-                    } = &child_node.data
-                    {
-                        // Retrieve the marker content
-                        if let Some(marker_node_id) =
-                            marker_map.retrieve_marker(retrieve_class_name, *retrieve_position)
-                        {
-                            // Layout the marker's children as if they were direct children
-                            self.layout_marker_content(
-                                fo_tree,
-                                marker_node_id,
-                                area_tree,
-                                area_id,
-                                block_ctx.current_y,
-                                static_rect.width,
-                                resolver,
-                            )?;
-                        }
-                        continue;
-                    }
-                }
-
-                if let Some(child_area_id) = self.layout_block(
-                    fo_tree,
-                    child_id,
-                    area_tree,
-                    area_id,
-                    block_ctx.current_y,
-                    static_rect.width,
-                    resolver,
-                )? {
-                    if let Some(child_area) = area_tree.get(child_area_id) {
-                        // Update context with actual height used
-                        block_ctx.current_y = child_area.area.geometry.y + child_area.area.height();
-                    }
-                }
-            }
-
-            Ok(Some(area_id))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Collect markers from the flow content
-    #[allow(clippy::only_used_in_recursion)]
-    pub(super) fn collect_markers(
-        &self,
-        fo_tree: &FoArena,
-        node_id: NodeId,
-        marker_map: &mut MarkerMap,
-    ) {
-        // Traverse the tree and collect all markers
-        if let Some(node) = fo_tree.get(node_id) {
-            if let FoNodeData::Marker {
-                marker_class_name, ..
-            } = &node.data
-            {
-                // For now, assume all markers start and end on the page
-                // In a full implementation, this would track page breaks
-                marker_map.add_marker(marker_class_name.clone(), node_id, true, true);
-            }
-
-            // Recursively collect from children
-            let children = fo_tree.children(node_id);
-            for child_id in children {
-                self.collect_markers(fo_tree, child_id, marker_map);
-            }
         }
     }
 

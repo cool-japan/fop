@@ -12,6 +12,7 @@ pub use break_keep::{
     extract_break_after, extract_break_before, extract_keep_constraint, extract_orphans,
     extract_widows,
 };
+pub(crate) use extraction::measure_text_metrics;
 pub use extraction::{extract_traits, measure_text_width};
 pub use misc::{
     extract_border_radius, extract_clear, extract_column_count, extract_column_gap,

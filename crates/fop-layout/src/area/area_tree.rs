@@ -2,7 +2,7 @@
 //!
 //! Similar to the FO tree, uses arena allocation for areas.
 
-use super::Area;
+use super::{Area, AreaType};
 use std::fmt;
 
 /// Index-based handle to an area in the tree
@@ -146,6 +146,94 @@ impl AreaTree {
         }
 
         Ok(())
+    }
+
+    /// Move `child` (with its entire subtree) from its current parent to
+    /// `new_parent`, appended as the last child of `new_parent`.
+    ///
+    /// This performs the linked-list surgery required to detach `child` from
+    /// its current parent's sibling chain and re-attach it under `new_parent`.
+    /// Because area geometry is stored relative to the parent's origin, callers
+    /// that move a node between containers with different origins must also
+    /// update the moved node's own `geometry` (its descendants keep their
+    /// parent-relative positions and need no change).
+    ///
+    /// Used by the layout engine's pagination loop to relocate an overflowing
+    /// block from one page's region-body to the next page's region-body.
+    pub fn reparent(&mut self, child: AreaId, new_parent: AreaId) -> Result<(), String> {
+        if child.0 >= self.nodes.len() {
+            return Err(format!("Child area {} does not exist", child.0));
+        }
+        if new_parent.0 >= self.nodes.len() {
+            return Err(format!("Parent area {} does not exist", new_parent.0));
+        }
+        if child == new_parent {
+            return Err("Cannot reparent an area onto itself".to_string());
+        }
+
+        // Detach `child` from its current parent's sibling chain, if any.
+        if let Some(old_parent) = self.nodes[child.0].parent {
+            let detached_next = self.nodes[child.0].next_sibling;
+            if self.nodes[old_parent.0].first_child == Some(child) {
+                // `child` was the first child: promote its next sibling.
+                self.nodes[old_parent.0].first_child = detached_next;
+            } else {
+                // Walk the sibling chain to find the predecessor of `child`.
+                let mut cursor = self.nodes[old_parent.0].first_child;
+                while let Some(current) = cursor {
+                    let next = self.nodes[current.0].next_sibling;
+                    if next == Some(child) {
+                        self.nodes[current.0].next_sibling = detached_next;
+                        break;
+                    }
+                    cursor = next;
+                }
+            }
+        }
+
+        // Clear the moved node's links before re-attaching.
+        self.nodes[child.0].next_sibling = None;
+        self.nodes[child.0].parent = None;
+
+        // Re-attach under the new parent as its last child.
+        self.append_child(new_parent, child)
+    }
+
+    /// Stably reorder a parent's direct children by an ascending priority key.
+    ///
+    /// Children sharing a priority keep their current relative order (the sort
+    /// is stable).  Used by the pagination engine to restore the canonical page
+    /// child order after static content (headers/footers) is appended in a
+    /// deferred second pass: the append-only [`Self::append_child`] would
+    /// otherwise leave the static regions trailing the region-body.
+    ///
+    /// Only sibling links are rewritten; parent links, geometry and descendants
+    /// are untouched, so this is purely a reordering of `parent`'s child list.
+    pub(crate) fn reorder_children<F: Fn(AreaType) -> u8>(&mut self, parent: AreaId, priority: F) {
+        let mut children = self.children(parent);
+        if children.len() < 2 {
+            return;
+        }
+        children.sort_by_key(|&child| {
+            self.get(child)
+                .map(|node| priority(node.area.area_type))
+                .unwrap_or(u8::MAX)
+        });
+
+        let parent_index = parent.0;
+        if parent_index >= self.nodes.len() {
+            return;
+        }
+        self.nodes[parent_index].first_child = children.first().copied();
+        let last = children.len() - 1;
+        for (offset, &child) in children.iter().enumerate() {
+            let next = if offset < last {
+                Some(children[offset + 1])
+            } else {
+                None
+            };
+            self.nodes[child.0].next_sibling = next;
+        }
     }
 
     /// Get all children of an area
@@ -421,6 +509,72 @@ mod tests {
         assert_eq!(children[0], block1);
         assert_eq!(children[1], block2);
         assert_eq!(children[2], block3);
+    }
+
+    #[test]
+    fn test_reparent_middle_child_moves_subtree() {
+        let mut tree = AreaTree::new();
+
+        // region_a holds [block1, block2, block3]; region_b is empty.
+        let region_a = tree.add_area(Area::new(AreaType::Region, make_rect(160.0, 247.0)));
+        let region_b = tree.add_area(Area::new(AreaType::Region, make_rect(160.0, 247.0)));
+        let block1 = tree.add_area(Area::new(AreaType::Block, make_rect(100.0, 50.0)));
+        let block2 = tree.add_area(Area::new(AreaType::Block, make_rect(100.0, 50.0)));
+        let block3 = tree.add_area(Area::new(AreaType::Block, make_rect(100.0, 50.0)));
+        // Give block2 a child so we can verify the whole subtree moves.
+        let line = tree.add_area(Area::new(AreaType::Text, make_rect(100.0, 12.0)));
+
+        tree.append_child(region_a, block1)
+            .expect("test: should succeed");
+        tree.append_child(region_a, block2)
+            .expect("test: should succeed");
+        tree.append_child(region_a, block3)
+            .expect("test: should succeed");
+        tree.append_child(block2, line)
+            .expect("test: should succeed");
+
+        // Move the middle child (block2) to region_b.
+        tree.reparent(block2, region_b)
+            .expect("test: reparent should succeed");
+
+        // region_a now holds [block1, block3] in order.
+        assert_eq!(tree.children(region_a), vec![block1, block3]);
+        // region_b now holds [block2].
+        assert_eq!(tree.children(region_b), vec![block2]);
+        // block2's parent is region_b and its subtree (line) came along.
+        assert_eq!(
+            tree.get(block2).expect("test: block2 exists").parent,
+            Some(region_b)
+        );
+        assert_eq!(tree.children(block2), vec![line]);
+    }
+
+    #[test]
+    fn test_reparent_first_child_promotes_sibling() {
+        let mut tree = AreaTree::new();
+
+        let region_a = tree.add_area(Area::new(AreaType::Region, make_rect(160.0, 247.0)));
+        let region_b = tree.add_area(Area::new(AreaType::Region, make_rect(160.0, 247.0)));
+        let block1 = tree.add_area(Area::new(AreaType::Block, make_rect(100.0, 50.0)));
+        let block2 = tree.add_area(Area::new(AreaType::Block, make_rect(100.0, 50.0)));
+
+        tree.append_child(region_a, block1)
+            .expect("test: should succeed");
+        tree.append_child(region_a, block2)
+            .expect("test: should succeed");
+
+        tree.reparent(block1, region_b)
+            .expect("test: reparent should succeed");
+
+        assert_eq!(tree.children(region_a), vec![block2]);
+        assert_eq!(tree.children(region_b), vec![block1]);
+    }
+
+    #[test]
+    fn test_reparent_onto_self_is_error() {
+        let mut tree = AreaTree::new();
+        let region = tree.add_area(Area::new(AreaType::Region, make_rect(160.0, 247.0)));
+        assert!(tree.reparent(region, region).is_err());
     }
 
     #[test]

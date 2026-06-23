@@ -7,6 +7,7 @@ pub mod compliance;
 pub mod document;
 pub mod font;
 pub mod font_config;
+mod font_subset;
 pub mod graphics;
 pub mod image;
 pub mod outline;

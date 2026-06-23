@@ -26,6 +26,7 @@ png = { workspace = true }
 jpeg-decoder = { workspace = true }
 oxiarc-deflate = { workspace = true }
 ttf-parser = { workspace = true }
+subsetter = { workspace = true }
 resvg = { workspace = true, optional = true }
 usvg = { workspace = true, optional = true }
 tiny-skia = { workspace = true, optional = true }
@@ -34,6 +35,11 @@ aes = { workspace = true }
 cbc = { workspace = true }
 sha2 = { workspace = true }
 md-5 = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }
+# Used by the end-to-end font-subset round-trip test: it loads a generated PDF
+# back through the workspace's own pure-Rust PDF renderer to prove the embedded
+# subset's CIDToGIDMap / cmap / widths stay consistent (text + glyph rendering).
+fop-pdf-renderer = { workspace = true }

@@ -8,29 +8,118 @@ use std::collections::HashMap;
 /// Maximum property ID (294 properties in XSL-FO 1.1 + extensions)
 const MAX_PROPERTY_ID: usize = 295;
 
-/// Property inheritance flags
-/// Based on XSL-FO 1.1 spec: http://www.w3.org/TR/xsl11/#property-index
+/// Property inheritance flags.
+///
+/// Every `true` entry corresponds to a property whose XSL-FO 1.1 specification
+/// table row carries "Inherited: yes" (https://www.w3.org/TR/xsl11/#property-index).
+/// Properties absent from this table use their initial values when no explicit
+/// value is set and there is no explicit `inherit` keyword in the source.
 static INHERITABLE_PROPERTIES: [bool; MAX_PROPERTY_ID] = {
     let mut flags = [false; MAX_PROPERTY_ID];
 
-    // Common inheritable properties
+    // ── Font properties ───────────────────────────────────────── §7.9 ──
+    // color is grouped with font because it is the most common "font-like" inherit.
     flags[PropertyId::Color as usize] = true;
     flags[PropertyId::FontFamily as usize] = true;
+    flags[PropertyId::FontSelectionStrategy as usize] = true;
     flags[PropertyId::FontSize as usize] = true;
+    flags[PropertyId::FontSizeAdjust as usize] = true;
+    flags[PropertyId::FontStretch as usize] = true;
     flags[PropertyId::FontStyle as usize] = true;
+    flags[PropertyId::FontVariant as usize] = true;
     flags[PropertyId::FontWeight as usize] = true;
-    flags[PropertyId::LineHeight as usize] = true;
-    flags[PropertyId::TextAlign as usize] = true;
-    flags[PropertyId::TextIndent as usize] = true;
-    flags[PropertyId::WhiteSpace as usize] = true;
-    flags[PropertyId::Visibility as usize] = true;
+
+    // ── Hyphenation and language ──────────────────────────────── §7.9.4 ──
+    flags[PropertyId::Country as usize] = true;
+    flags[PropertyId::Hyphenate as usize] = true;
+    flags[PropertyId::HyphenationCharacter as usize] = true;
+    flags[PropertyId::HyphenationKeep as usize] = true;
+    flags[PropertyId::HyphenationLadderCount as usize] = true;
+    flags[PropertyId::HyphenationPushCharacterCount as usize] = true;
+    flags[PropertyId::HyphenationRemainCharacterCount as usize] = true;
+    flags[PropertyId::Language as usize] = true;
+    flags[PropertyId::Script as usize] = true;
+
+    // ── Text-formatting properties ────────────────────────────── §7.15 ──
+    flags[PropertyId::LastLineEndIndent as usize] = true;
     flags[PropertyId::LetterSpacing as usize] = true;
+    flags[PropertyId::LineHeight as usize] = true;
+    flags[PropertyId::ScoreSpaces as usize] = true;
+    flags[PropertyId::SuppressAtLineBreak as usize] = true;
+    flags[PropertyId::TextAlign as usize] = true;
+    flags[PropertyId::TextAlignLast as usize] = true;
+    flags[PropertyId::TextAltitude as usize] = true;
+    flags[PropertyId::TextDepth as usize] = true;
+    flags[PropertyId::TextIndent as usize] = true;
+    flags[PropertyId::TextTransform as usize] = true;
+    flags[PropertyId::TreatAsWordSpace as usize] = true;
+    flags[PropertyId::Visibility as usize] = true;
     flags[PropertyId::WordSpacing as usize] = true;
+
+    // ── White-space and line-break treatment ──────────────────── §7.15.3 ──
+    flags[PropertyId::LinefeedTreatment as usize] = true;
+    flags[PropertyId::WhiteSpace as usize] = true;
+    flags[PropertyId::WhiteSpaceCollapse as usize] = true;
+    flags[PropertyId::WhiteSpaceTreatment as usize] = true;
+    flags[PropertyId::WrapOption as usize] = true;
+
+    // ── Bidirectional and glyph-orientation ───────────────────── §7.27 ──
     flags[PropertyId::Direction as usize] = true;
+    flags[PropertyId::GlyphOrientationHorizontal as usize] = true;
+    flags[PropertyId::GlyphOrientationVertical as usize] = true;
     flags[PropertyId::WritingMode as usize] = true;
 
-    // Add more inheritable properties as needed
-    // (This is a simplified set; full spec has more)
+    // ── Reference orientation ─────────────────────────────────── §7.20.1 ──
+    flags[PropertyId::ReferenceOrientation as usize] = true;
+
+    // ── Line-stacking strategy ────────────────────────────────── §7.12 ──
+    flags[PropertyId::LineHeightShiftAdjustment as usize] = true;
+    flags[PropertyId::LineStackingStrategy as usize] = true;
+
+    // ── Pagination ────────────────────────────────────────────── §7.19 ──
+    flags[PropertyId::Orphans as usize] = true;
+    flags[PropertyId::Widows as usize] = true;
+
+    // ── Table properties ──────────────────────────────────────── §7.26 ──
+    flags[PropertyId::BorderCollapse as usize] = true;
+    flags[PropertyId::BorderSeparation as usize] = true;
+    flags[PropertyId::BorderSpacing as usize] = true;
+    flags[PropertyId::CaptionSide as usize] = true;
+    flags[PropertyId::EmptyCells as usize] = true;
+
+    // ── List formatting ───────────────────────────────────────── §7.28 ──
+    flags[PropertyId::ProvisionalDistanceBetweenStarts as usize] = true;
+    flags[PropertyId::ProvisionalLabelSeparation as usize] = true;
+
+    // ── Relative alignment ────────────────────────────────────── §7.13.6 ──
+    flags[PropertyId::RelativeAlign as usize] = true;
+
+    // ── Leader and rule formatting ────────────────────────────── §7.21 ──
+    // leader-length is Inherited: no — excluded.
+    flags[PropertyId::LeaderAlignment as usize] = true;
+    flags[PropertyId::LeaderPattern as usize] = true;
+    flags[PropertyId::LeaderPatternWidth as usize] = true;
+    flags[PropertyId::RuleStyle as usize] = true;
+    flags[PropertyId::RuleThickness as usize] = true;
+
+    // ── Aural / speech properties ─────────────────────────────── §7.7 ──
+    flags[PropertyId::Azimuth as usize] = true;
+    flags[PropertyId::Elevation as usize] = true;
+    flags[PropertyId::Pitch as usize] = true;
+    flags[PropertyId::PitchRange as usize] = true;
+    flags[PropertyId::Richness as usize] = true;
+    flags[PropertyId::Speak as usize] = true;
+    flags[PropertyId::SpeakHeader as usize] = true;
+    flags[PropertyId::SpeakNumeral as usize] = true;
+    flags[PropertyId::SpeakPunctuation as usize] = true;
+    flags[PropertyId::SpeechRate as usize] = true;
+    flags[PropertyId::Stress as usize] = true;
+    flags[PropertyId::VoiceFamily as usize] = true;
+    flags[PropertyId::Volume as usize] = true;
+
+    // ── xml:lang ──────────────────────────────────────────────── §7.9.4 ──
+    // Locale tag inherits down the element tree just like `language`.
+    flags[PropertyId::XmlLang as usize] = true;
 
     flags
 };
@@ -1009,5 +1098,206 @@ mod additional_tests {
             .get(PropertyId::FontSize)
             .expect("test: should succeed");
         assert_eq!(fs.as_length(), Some(Length::from_pt(10.0)));
+    }
+}
+
+// ===== TESTS FOR EXTENDED XSL-FO 1.1 INHERITED PROPERTIES =====
+//
+// Verifies:
+//  1. Several newly-added inheritable properties propagate parent → child.
+//  2. A canonical non-inherited property (margin-top / padding-left) does NOT propagate.
+#[cfg(test)]
+mod xslfo_inherit_extended_tests {
+    use super::*;
+    use fop_types::Length;
+
+    // ── language: §7.9.4 Inherited: yes ─────────────────────────────────
+    #[test]
+    fn test_language_inherits_from_parent_to_child() {
+        let mut parent = PropertyList::new();
+        parent.set(
+            PropertyId::Language,
+            PropertyValue::String(std::borrow::Cow::Borrowed("en")),
+        );
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::Language)
+            .expect("test: should succeed");
+        assert_eq!(value.as_string(), Some("en"));
+    }
+
+    // ── wrap-option: §7.15.3 Inherited: yes ─────────────────────────────
+    // EN_NO_WRAP = 88  (initial is EN_WRAP = 139)
+    #[test]
+    fn test_wrap_option_inherits_from_parent_to_child() {
+        let mut parent = PropertyList::new();
+        parent.set(PropertyId::WrapOption, PropertyValue::Enum(88));
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::WrapOption)
+            .expect("test: should succeed");
+        assert_eq!(value.as_enum(), Some(88));
+    }
+
+    // ── orphans: §7.19.6 Inherited: yes ─────────────────────────────────
+    #[test]
+    fn test_orphans_inherits_from_parent_to_child() {
+        let mut parent = PropertyList::new();
+        // Initial is 2; set 4 so we can distinguish inherited vs initial.
+        parent.set(PropertyId::Orphans, PropertyValue::Integer(4));
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::Orphans)
+            .expect("test: should succeed");
+        assert_eq!(value.as_integer(), Some(4));
+    }
+
+    // ── hyphenate: §7.9.4 Inherited: yes ────────────────────────────────
+    // EN_TRUE = 134  (initial is EN_FALSE = 48)
+    #[test]
+    fn test_hyphenate_inherits_from_parent_to_child() {
+        let mut parent = PropertyList::new();
+        parent.set(PropertyId::Hyphenate, PropertyValue::Enum(134));
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::Hyphenate)
+            .expect("test: should succeed");
+        assert_eq!(value.as_enum(), Some(134));
+    }
+
+    // ── country: §7.9.4 Inherited: yes ──────────────────────────────────
+    #[test]
+    fn test_country_inherits_from_parent_to_child() {
+        let mut parent = PropertyList::new();
+        parent.set(
+            PropertyId::Country,
+            PropertyValue::String(std::borrow::Cow::Borrowed("US")),
+        );
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::Country)
+            .expect("test: should succeed");
+        assert_eq!(value.as_string(), Some("US"));
+    }
+
+    // ── font-variant: §7.9 Inherited: yes ───────────────────────────────
+    // EN_SMALL_CAPS = 122  (initial is EN_NORMAL = 87)
+    #[test]
+    fn test_font_variant_inherits_from_parent_to_child() {
+        let mut parent = PropertyList::new();
+        parent.set(PropertyId::FontVariant, PropertyValue::Enum(122));
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::FontVariant)
+            .expect("test: should succeed");
+        assert_eq!(value.as_enum(), Some(122));
+    }
+
+    // ── widows: §7.19.7 Inherited: yes ──────────────────────────────────
+    #[test]
+    fn test_widows_inherits_through_chain() {
+        let mut grandparent = PropertyList::new();
+        grandparent.set(PropertyId::Widows, PropertyValue::Integer(5));
+        // parent doesn't override widows
+        let parent = PropertyList::with_parent(&grandparent);
+        let child = PropertyList::with_parent(&parent);
+        let value = child.get(PropertyId::Widows).expect("test: should succeed");
+        assert_eq!(value.as_integer(), Some(5));
+    }
+
+    // ── is_inheritable: spot-check several newly-added entries ───────────
+    #[test]
+    fn test_is_inheritable_language() {
+        assert!(PropertyList::is_inheritable(PropertyId::Language));
+    }
+
+    #[test]
+    fn test_is_inheritable_wrap_option() {
+        assert!(PropertyList::is_inheritable(PropertyId::WrapOption));
+    }
+
+    #[test]
+    fn test_is_inheritable_orphans() {
+        assert!(PropertyList::is_inheritable(PropertyId::Orphans));
+    }
+
+    #[test]
+    fn test_is_inheritable_widows() {
+        assert!(PropertyList::is_inheritable(PropertyId::Widows));
+    }
+
+    #[test]
+    fn test_is_inheritable_font_variant() {
+        assert!(PropertyList::is_inheritable(PropertyId::FontVariant));
+    }
+
+    #[test]
+    fn test_is_inheritable_country() {
+        assert!(PropertyList::is_inheritable(PropertyId::Country));
+    }
+
+    // ── Non-inherited properties must NOT propagate ──────────────────────
+
+    /// margin-top is Inherited: no per §7.10
+    #[test]
+    fn test_margin_top_does_not_inherit() {
+        let mut parent = PropertyList::new();
+        parent.set(
+            PropertyId::MarginTop,
+            PropertyValue::Length(Length::from_pt(42.0)),
+        );
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::MarginTop)
+            .expect("test: should succeed");
+        // Must be initial value (0pt), not the parent's 42pt.
+        assert_eq!(value.as_length(), Some(Length::ZERO));
+    }
+
+    /// padding-left is Inherited: no per §7.10
+    #[test]
+    fn test_padding_left_does_not_inherit() {
+        let mut parent = PropertyList::new();
+        parent.set(
+            PropertyId::PaddingLeft,
+            PropertyValue::Length(Length::from_pt(20.0)),
+        );
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::PaddingLeft)
+            .expect("test: should succeed");
+        assert_eq!(value.as_length(), Some(Length::ZERO));
+    }
+
+    /// background-color is Inherited: no
+    #[test]
+    fn test_background_color_does_not_inherit() {
+        use fop_types::Color;
+        let mut parent = PropertyList::new();
+        parent.set(
+            PropertyId::BackgroundColor,
+            PropertyValue::Color(Color::RED),
+        );
+        let child = PropertyList::with_parent(&parent);
+        let value = child
+            .get(PropertyId::BackgroundColor)
+            .expect("test: should succeed");
+        // Initial background-color is transparent, not the parent's red.
+        assert_eq!(value.as_color(), Some(Color::TRANSPARENT));
+    }
+
+    #[test]
+    fn test_is_not_inheritable_margin_top() {
+        assert!(!PropertyList::is_inheritable(PropertyId::MarginTop));
+    }
+
+    #[test]
+    fn test_is_not_inheritable_padding_left() {
+        assert!(!PropertyList::is_inheritable(PropertyId::PaddingLeft));
+    }
+
+    #[test]
+    fn test_is_not_inheritable_background_color() {
+        assert!(!PropertyList::is_inheritable(PropertyId::BackgroundColor));
     }
 }

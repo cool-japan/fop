@@ -528,26 +528,27 @@ fn create_subset_font(original_font: &PdfFont, subsetter: &FontSubsetter) -> Res
         return Ok(original_font.clone());
     }
 
-    // Build glyph mapping: char -> glyph_id
-    let mut char_to_glyph = HashMap::new();
+    // Resolve every used character to its glyph in the *original* font. This set
+    // drives the subsetter; `.notdef` (glyph 0) is always retained so that any
+    // unmapped CID still renders the font's own missing-glyph box.
     let mut used_glyphs = BTreeSet::new();
-
-    // Always include glyph 0 (notdef)
     used_glyphs.insert(ttf_parser::GlyphId(0));
-
     for &c in used_chars.iter() {
         if let Some(glyph_id) = face.glyph_index(c) {
-            char_to_glyph.insert(c, glyph_id);
             used_glyphs.insert(glyph_id);
         }
     }
 
-    // Create a simple subset by keeping only the used glyphs
-    // For now, we'll use the full font but track which characters are used
-    // A full subsetting implementation would rebuild the TTF tables
+    // Produce the real, strictly-smaller subset. `subsetter` renumbers the
+    // retained glyphs into a new contiguous space and hands back an
+    // original-GID -> new-GID map (see `font_subset` for the full rationale).
+    // Everything the PDF says about glyph identity — the `CIDToGIDMap` stream
+    // (generated downstream from `char_to_glyph`) and the embedded `cmap` — must
+    // therefore speak this *new* glyph space.
+    let subset = crate::pdf::font_subset::subset_font(&original_font.font_data, &used_glyphs)?;
 
-    // For CID fonts, we use CID-based width arrays
-    // First and last char codes for the range
+    // CID first/last range. Under Identity-H the CID is the Unicode code point,
+    // so the width range is independent of glyph renumbering.
     let first_char = used_chars.iter().next().map(|&c| c as u32).unwrap_or(0);
     let last_char = used_chars
         .iter()
@@ -555,11 +556,14 @@ fn create_subset_font(original_font: &PdfFont, subsetter: &FontSubsetter) -> Res
         .map(|&c| c as u32)
         .unwrap_or(0xFFFF);
 
-    // Build character to glyph mapping for all used characters
-    let mut char_to_glyph_map = std::collections::HashMap::new();
+    // char -> NEW glyph id. This feeds the `CIDToGIDMap` stream, so it must use
+    // the remapped IDs to stay consistent with the embedded subset bytes.
+    let mut char_to_glyph_map = HashMap::new();
     for &c in used_chars.iter() {
         if let Some(glyph_id) = face.glyph_index(c) {
-            char_to_glyph_map.insert(c, glyph_id.0);
+            if let Some(&new_gid) = subset.gid_map.get(&glyph_id.0) {
+                char_to_glyph_map.insert(c, new_gid);
+            }
         }
     }
 
@@ -590,13 +594,9 @@ fn create_subset_font(original_font: &PdfFont, subsetter: &FontSubsetter) -> Res
         }
     }
 
-    // For a simple implementation, we'll embed the full font but only declare the used character range
-    // A full implementation would rebuild the TTF with only used glyphs
-    let subset_font_data = create_simple_subset(&original_font.font_data, &used_glyphs)?;
-
     Ok(PdfFont {
         font_name: original_font.font_name.clone(),
-        font_data: subset_font_data,
+        font_data: subset.data,
         flags: original_font.flags,
         bbox: original_font.bbox,
         italic_angle: original_font.italic_angle,
@@ -610,37 +610,6 @@ fn create_subset_font(original_font: &PdfFont, subsetter: &FontSubsetter) -> Res
         units_per_em: original_font.units_per_em,
         char_to_glyph: char_to_glyph_map,
     })
-}
-
-/// Create a simple subset by including only used glyphs
-fn create_simple_subset(
-    font_data: &[u8],
-    used_glyphs: &BTreeSet<ttf_parser::GlyphId>,
-) -> Result<Vec<u8>> {
-    let face = ttf_parser::Face::parse(font_data, 0)
-        .map_err(|e| FopError::Generic(format!("Failed to parse TTF for subsetting: {:?}", e)))?;
-
-    // For a basic implementation, we use a simplified approach:
-    // If the subset is small enough (< 50% of glyphs), we create a minimal subset
-    // Otherwise, we keep the full font
-
-    let total_glyphs = face.number_of_glyphs();
-    let used_glyph_count = used_glyphs.len();
-
-    // If we're using more than 50% of glyphs, just use the full font
-    if used_glyph_count as f32 / total_glyphs as f32 > 0.5 {
-        return Ok(font_data.to_vec());
-    }
-
-    // For now, return the full font data
-    // A full implementation would rebuild the TTF tables with only used glyphs
-    // This requires:
-    // 1. Remapping glyph IDs to be contiguous (0, 1, 2, ...)
-    // 2. Rebuilding glyf, loca, cmap tables
-    // 3. Updating head, hhea, hmtx, maxp tables
-    // 4. Recalculating checksums
-
-    Ok(font_data.to_vec())
 }
 
 #[cfg(test)]
@@ -865,5 +834,132 @@ mod tests_extended {
             .generate_font_objects(10)
             .expect("test: should succeed");
         assert!(objects.is_empty());
+    }
+}
+
+/// End-to-end font-subset round-trip tests.
+///
+/// These build a real PDF that embeds a subsetted font, then load it back with
+/// the workspace's own pure-Rust PDF renderer (`fop-pdf-renderer`). Passing them
+/// proves three things at once:
+///   * the embedded font really was subsetted (the whole PDF is far smaller than
+///     the full font), and
+///   * the `ToUnicode` CMap stayed consistent (`extract_text` recovers the
+///     original string with no `?` / replacement characters), and
+///   * the `CIDToGIDMap` stayed consistent with the *remapped* glyph space
+///     (rasterising the page actually paints glyph ink rather than empty
+///     `.notdef` boxes).
+#[cfg(test)]
+mod subset_roundtrip_tests {
+    use crate::pdf::document::{PdfDocument, PdfPage};
+    use fop_pdf_renderer::PdfRenderer;
+    use fop_types::Length;
+
+    const DEJAVU_SANS: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+    fn dejavu_bytes() -> Vec<u8> {
+        assert!(
+            std::path::Path::new(DEJAVU_SANS).exists(),
+            "DejaVu Sans not found at {DEJAVU_SANS:?}; install fonts-dejavu-core",
+        );
+        std::fs::read(DEJAVU_SANS).expect("test: read DejaVu Sans")
+    }
+
+    /// Build a single-page PDF that draws `text` with an embedded, subsetted
+    /// DejaVu Sans, returning `(pdf_bytes, original_font_len)`.
+    fn build_pdf_with_subset(text: &str) -> (Vec<u8>, usize) {
+        let font_data = dejavu_bytes();
+        let original_len = font_data.len();
+
+        let mut doc = PdfDocument::new();
+        let font_index = doc.embed_font(font_data).expect("test: embed font");
+
+        let mut page = PdfPage::new(Length::from_pt(612.0), Length::from_pt(792.0));
+        page.add_text_with_font_tracked(
+            text,
+            Length::from_pt(72.0),
+            Length::from_pt(700.0),
+            Length::from_pt(24.0),
+            font_index,
+            &mut doc.font_manager,
+        );
+        doc.add_page(page);
+
+        let pdf_bytes = doc.to_bytes().expect("test: to_bytes");
+        (pdf_bytes, original_len)
+    }
+
+    /// (c) Generate a PDF embedding a subset font, load it back through
+    /// `fop-pdf-renderer`, and assert the text round-trips uncorrupted.
+    #[test]
+    fn pdf_embedded_subset_text_roundtrips() {
+        let text = "Café Subset 42";
+        let (pdf_bytes, original_len) = build_pdf_with_subset(text);
+
+        // The whole PDF must be far smaller than the full font; if subsetting had
+        // silently degraded to embedding the full font, the PDF alone would be
+        // larger than the 750 KB source.
+        assert!(
+            pdf_bytes.len() < original_len,
+            "PDF ({} bytes) should be smaller than the full font ({} bytes) — \
+             was the font actually subsetted?",
+            pdf_bytes.len(),
+            original_len,
+        );
+
+        // Round-trip the bytes through a real temp file (per the project's
+        // temp-file policy) before reloading them.
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "fop_subset_roundtrip_{}_{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::write(&path, &pdf_bytes).expect("test: write pdf");
+        let reloaded = std::fs::read(&path).expect("test: read pdf back");
+        let _ = std::fs::remove_file(&path);
+
+        let renderer = PdfRenderer::from_bytes(&reloaded).expect("test: parse generated PDF");
+        let extracted = renderer.extract_text(0).expect("test: extract text");
+
+        assert!(
+            extracted.contains(text),
+            "expected the round-tripped text {text:?}, got {extracted:?}",
+        );
+        // A broken CID/ToUnicode mapping surfaces as '?' (composite fallback) or
+        // the Unicode replacement character — neither must appear.
+        assert!(
+            !extracted.contains('?') && !extracted.contains('\u{FFFD}'),
+            "extracted text contains corruption markers: {extracted:?}",
+        );
+    }
+
+    /// (c, rendering half) Rasterising the embedded subset must paint real glyph
+    /// ink. This exercises the `CID -> CIDToGIDMap -> glyph outline` path against
+    /// the *remapped* glyph space; if `char_to_glyph` and the subset bytes spoke
+    /// different glyph ID spaces, the page would come out blank (DejaVu's
+    /// `.notdef` is an empty glyph).
+    #[test]
+    fn pdf_embedded_subset_renders_glyph_ink() {
+        let (pdf_bytes, _original_len) = build_pdf_with_subset("Hello Subset");
+
+        let renderer = PdfRenderer::from_bytes(&pdf_bytes).expect("test: parse generated PDF");
+        let page = renderer.render_page(0, 96.0).expect("test: render page");
+
+        // Count near-black, opaque pixels (the default text fill colour is black).
+        let dark_pixels = page
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| px[0] < 96 && px[1] < 96 && px[2] < 96 && px[3] > 0)
+            .count();
+
+        assert!(
+            dark_pixels > 200,
+            "expected glyph ink from the embedded subset, found only {dark_pixels} dark pixels — \
+             CIDToGIDMap likely inconsistent with the remapped subset glyph space",
+        );
     }
 }

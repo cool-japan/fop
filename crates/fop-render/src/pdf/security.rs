@@ -16,6 +16,20 @@ use sha2::Digest as _;
 use sha2::Sha256;
 
 // ---------------------------------------------------------------------------
+// OS CSPRNG wrapper
+// ---------------------------------------------------------------------------
+
+/// Fill `buf` with cryptographically secure random bytes from the OS entropy source.
+///
+/// Wraps `getrandom::fill` and terminates the process via `expect` on failure,
+/// because an unavailable OS random source is a catastrophic security failure —
+/// continuing without genuine entropy is never safe.
+fn csprng_fill(buf: &mut [u8]) {
+    getrandom::fill(buf)
+        .expect("OS entropy source unavailable: cannot generate cryptographic random bytes");
+}
+
+// ---------------------------------------------------------------------------
 // Encryption algorithm selector
 // ---------------------------------------------------------------------------
 
@@ -308,12 +322,18 @@ impl PdfSecurity {
     fn compute_aes256_encryption_dict(&self) -> EncryptionDict {
         let p_value = self.permissions.to_p_value();
 
-        // Generate random salts (8 bytes each) — use pseudo-random from hash of passwords
-        // In a production system, use a CSPRNG; here we derive deterministically for testing
-        let user_validation_salt = derive_salt(&self.user_password, b"user_val");
-        let user_key_salt = derive_salt(&self.user_password, b"user_key");
-        let owner_validation_salt = derive_salt(&self.owner_password, b"owner_val");
-        let owner_key_salt = derive_salt(&self.owner_password, b"owner_key");
+        // Generate random salts (8 bytes each) per PDF 2.0 §7.6.4.3.3.
+        // Each salt MUST be drawn from a CSPRNG — deterministic salts allow
+        // an attacker to correlate U/O/UE/OE across documents encrypted with
+        // the same password.
+        let mut user_validation_salt = [0u8; 8];
+        csprng_fill(&mut user_validation_salt);
+        let mut user_key_salt = [0u8; 8];
+        csprng_fill(&mut user_key_salt);
+        let mut owner_validation_salt = [0u8; 8];
+        csprng_fill(&mut owner_validation_salt);
+        let mut owner_key_salt = [0u8; 8];
+        csprng_fill(&mut owner_key_salt);
 
         // --- Algorithm 8: Compute U and UE ---
         // U = SHA-256(user_password + user_validation_salt) || user_validation_salt || user_key_salt
@@ -324,8 +344,10 @@ impl PdfSecurity {
         u_value.extend_from_slice(&user_key_salt);
         // u_value is 48 bytes
 
-        // File encryption key: 32 random bytes (derived deterministically)
-        let file_enc_key = derive_file_enc_key(&self.owner_password, &self.user_password);
+        // File encryption key: 32 fresh random bytes per PDF 2.0 §7.6.4.3.3.
+        let mut file_enc_key_arr = [0u8; 32];
+        csprng_fill(&mut file_enc_key_arr);
+        let file_enc_key: Vec<u8> = file_enc_key_arr.to_vec();
 
         // UE: encrypt file_enc_key with AES-256-CBC, key = SHA-256(user_password + user_key_salt)
         let ue_key = sha256_hash_parts(&[self.user_password.as_bytes(), &user_key_salt]);
@@ -363,11 +385,13 @@ impl PdfSecurity {
         perms_plain[9] = b'a';
         perms_plain[10] = b'd';
         perms_plain[11] = b'b';
-        // bytes 12-15: random (deterministic from key for reproducibility)
-        perms_plain[12] = file_enc_key[0];
-        perms_plain[13] = file_enc_key[1];
-        perms_plain[14] = file_enc_key[2];
-        perms_plain[15] = file_enc_key[3];
+        // bytes 12-15: 4 random padding bytes per PDF 2.0 §7.6.4.3.3
+        let mut perms_pad = [0u8; 4];
+        csprng_fill(&mut perms_pad);
+        perms_plain[12] = perms_pad[0];
+        perms_plain[13] = perms_pad[1];
+        perms_plain[14] = perms_pad[2];
+        perms_plain[15] = perms_pad[3];
 
         let perms_value = aes256_ecb_encrypt_block(&perms_plain, &file_enc_key);
 
@@ -430,8 +454,9 @@ impl EncryptionDict {
                 rc4_encrypt(&key, data)
             }
             EncryptionAlgorithm::Aes256 => {
-                // AES-256-CBC with a deterministic IV (derived from key + obj_num for reproducibility)
-                encrypt_aes256_cbc(data, &self.encryption_key, obj_num)
+                // AES-256-CBC with a fresh random IV per PDF 2.0 §7.6.4.3.3.
+                // The IV is prepended to the ciphertext (16 bytes || ciphertext).
+                encrypt_aes256_cbc(data, &self.encryption_key)
             }
         }
     }
@@ -526,17 +551,19 @@ impl EncryptionDict {
         block.into()
     }
 
-    /// Encrypt data using AES-256-CBC with a random IV prepended to the output
+    /// Encrypt data using AES-256-CBC with a fresh random IV prepended to the output.
     ///
     /// For AES-256 encryption of PDF streams and strings.
     /// Returns IV (16 bytes) || ciphertext.
+    ///
+    /// The IV is generated from the OS CSPRNG on every call, so two invocations
+    /// with the same `data` and `key` will produce different ciphertext — this is
+    /// the correct and required behaviour per PDF 2.0 §7.6.4.3.3.
     #[allow(dead_code)]
     pub fn encrypt_aes256(data: &[u8], key: &[u8]) -> Vec<u8> {
-        // Generate a deterministic IV from key hash for testing
-        // In production, use a CSPRNG
-        let iv = sha256_hash_parts(&[key, data])[..16].to_vec();
+        // Fresh random IV per PDF 2.0 §7.6.4.3.3.
         let mut iv_arr = [0u8; 16];
-        iv_arr.copy_from_slice(&iv);
+        csprng_fill(&mut iv_arr);
 
         type Aes256Cbc = cbc::Encryptor<Aes256>;
         let cipher =
@@ -620,17 +647,18 @@ fn rc4_encrypt(key: &[u8], data: &[u8]) -> Vec<u8> {
     output
 }
 
-/// AES-256-CBC encrypt with PKCS7 padding; IV prepended to output
+/// AES-256-CBC encrypt with PKCS7 padding; fresh random IV prepended to output.
 ///
 /// Returns IV (16 bytes) || ciphertext.
-fn encrypt_aes256_cbc(data: &[u8], key: &[u8], obj_num: u32) -> Vec<u8> {
-    // Deterministic IV derived from key + obj_num (avoids need for rand crate)
-    let mut iv_src = [0u8; 36];
-    iv_src[..32].copy_from_slice(&key[..32]);
-    iv_src[32..36].copy_from_slice(&obj_num.to_le_bytes());
-    let iv_hash = sha256_hash_parts(&[&iv_src]);
+///
+/// Per PDF 2.0 §7.6.4.3.3, the IV MUST be drawn from a CSPRNG for each
+/// encryption operation.  Deterministic IVs allow cross-document ciphertext
+/// correlation and known-plaintext attacks against objects encrypted with the
+/// same file-encryption key.
+fn encrypt_aes256_cbc(data: &[u8], key: &[u8]) -> Vec<u8> {
+    // Fresh random IV per PDF 2.0 §7.6.4.3.3.
     let mut iv = [0u8; 16];
-    iv.copy_from_slice(&iv_hash[..16]);
+    csprng_fill(&mut iv);
 
     type Aes256Cbc = cbc::Encryptor<Aes256>;
     let cipher = Aes256Cbc::new_from_slices(&key[..32], &iv).expect("AES-256 key/IV lengths valid");
@@ -689,19 +717,6 @@ fn aes256_cbc_encrypt_with_pkcs7(mut cipher: cbc::Encryptor<Aes256>, data: &[u8]
     out
 }
 
-/// Derive a deterministic 8-byte salt from a password and a tag
-fn derive_salt(password: &str, tag: &[u8]) -> [u8; 8] {
-    let hash = sha256_hash_parts(&[password.as_bytes(), tag]);
-    let mut salt = [0u8; 8];
-    salt.copy_from_slice(&hash[..8]);
-    salt
-}
-
-/// Derive a deterministic 32-byte file encryption key
-fn derive_file_enc_key(owner_pass: &str, user_pass: &str) -> Vec<u8> {
-    sha256_hash_parts(&[owner_pass.as_bytes(), user_pass.as_bytes(), b"file_enc_key"])
-}
-
 /// Encode bytes as hexadecimal string (uppercase)
 fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02X}", b)).collect()
@@ -714,6 +729,66 @@ fn hex_encode(data: &[u8]) -> String {
 /// from a seed string.
 pub fn generate_file_id(seed: &str) -> Vec<u8> {
     md5_hash(seed.as_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers (compile only for tests)
+// ---------------------------------------------------------------------------
+
+/// Decrypt AES-256-CBC ciphertext whose first 16 bytes are the IV.
+///
+/// This is the inverse of `encrypt_aes256_cbc` / `EncryptionDict::encrypt_aes256`,
+/// used exclusively by round-trip tests.  It implements CBC by chaining AES
+/// block decryption + XOR with the previous ciphertext block (IV for the first
+/// block), then strips PKCS7 padding.
+#[cfg(test)]
+fn decrypt_aes256_cbc(ciphertext_with_iv: &[u8], key: &[u8]) -> Vec<u8> {
+    use aes::cipher::BlockCipherDecrypt;
+
+    assert!(
+        ciphertext_with_iv.len() >= 16,
+        "ciphertext_with_iv too short to contain a 16-byte IV"
+    );
+    let iv = &ciphertext_with_iv[..16];
+    let ciphertext = &ciphertext_with_iv[16..];
+
+    let cipher = Aes256::new_from_slice(&key[..32]).expect("AES-256 key is 32 bytes");
+
+    let mut out = Vec::with_capacity(ciphertext.len());
+    // prev starts as IV; updated to the current ciphertext block after each iteration
+    let mut prev = [0u8; 16];
+    prev.copy_from_slice(iv);
+
+    let block_count = ciphertext.len() / 16;
+    for i in 0..block_count {
+        let start = i * 16;
+        let end = start + 16;
+        // Save ciphertext block before AES decryption (it becomes the next prev)
+        let mut ct_block = [0u8; 16];
+        ct_block.copy_from_slice(&ciphertext[start..end]);
+
+        // AES block decrypt in-place
+        let mut block =
+            aes::Block::try_from(&ciphertext[start..end]).expect("block is exactly 16 bytes");
+        cipher.decrypt_block(&mut block);
+        let pt: [u8; 16] = block.into();
+
+        // XOR with previous ciphertext block to complete CBC
+        for j in 0..16 {
+            out.push(pt[j] ^ prev[j]);
+        }
+        prev = ct_block;
+    }
+
+    // Strip PKCS7 padding
+    if out.is_empty() {
+        return out;
+    }
+    let pad_len = *out.last().expect("output is non-empty") as usize;
+    if pad_len > 0 && pad_len <= 16 && pad_len <= out.len() {
+        out.truncate(out.len() - pad_len);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -890,16 +965,30 @@ mod tests {
     }
 
     #[test]
-    fn test_aes256_deterministic() {
-        // Same inputs should produce same encryption output
+    fn test_aes256_encrypt_decrypt_roundtrip() {
+        // Round-trip: encrypt → decrypt must recover the exact original plaintext.
         let security =
             PdfSecurity::new_aes256("owner_pass", "user_pass", PdfPermissions::default());
         let dict = security.compute_encryption_dict(&[]);
 
-        let plaintext = b"Test data for AES-256.";
+        let plaintext = b"Round-trip test: AES-256-CBC with CSPRNG IV.";
+        let ciphertext = dict.encrypt_data(plaintext, 5, 0);
+        let recovered = decrypt_aes256_cbc(&ciphertext, &dict.encryption_key);
+        assert_eq!(recovered, plaintext.as_slice());
+    }
+
+    #[test]
+    fn test_aes256_two_encryptions_of_same_input_differ() {
+        // Same plaintext + same key must produce distinct ciphertexts due to random IV.
+        let security =
+            PdfSecurity::new_aes256("owner_pass", "user_pass", PdfPermissions::default());
+        let dict = security.compute_encryption_dict(&[]);
+
+        let plaintext = b"Identical input encrypted twice must differ.";
         let enc1 = dict.encrypt_data(plaintext, 5, 0);
         let enc2 = dict.encrypt_data(plaintext, 5, 0);
-        assert_eq!(enc1, enc2);
+        // With independent 16-byte random IVs the probability of collision is 2^-128.
+        assert_ne!(enc1, enc2, "random IVs must produce distinct ciphertexts");
     }
 
     #[test]
@@ -1005,7 +1094,7 @@ mod tests_extended {
         let plaintext = b"same plaintext for both objects";
         let enc_obj1 = dict.encrypt_data(plaintext, 1, 0);
         let enc_obj2 = dict.encrypt_data(plaintext, 2, 0);
-        // Different objects → different derived keys → different ciphertext
+        // Different encrypt_data calls → independent random IVs → different ciphertext.
         assert_ne!(enc_obj1, enc_obj2);
     }
 

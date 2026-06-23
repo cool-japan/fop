@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// Maps font family names to font file paths.
 ///
 /// Font names are stored in lowercase for case-insensitive lookup.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FontConfig {
     /// Map from font family name (lowercase) to file path
     mappings: HashMap<String, PathBuf>,

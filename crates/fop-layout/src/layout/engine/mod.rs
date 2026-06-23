@@ -4,21 +4,25 @@
 
 mod block_layout;
 mod inline_layout;
+mod line_break_layout;
+mod markers;
 mod page_layout;
 mod page_master;
+mod pagination;
 mod table_layout;
+mod table_measure;
 pub(super) mod types;
 
 use crate::area::{Area, AreaContent, AreaTree, AreaType, TraitSet};
 use crate::layout::{
     extract_clear, extract_column_count, extract_column_gap, extract_space_after, extract_traits,
-    BlockLayoutContext, BorderCollapse, ColumnInfo, ColumnWidth, ListLayout, PageNumberResolver,
-    TableLayout, TableLayoutMode,
+    BlockLayoutContext, ListLayout, PageNumberResolver,
 };
 use fop_core::{FoArena, FoNodeData, NodeId, PropertyId};
 use fop_types::{FontRegistry, Length, Point, Rect, Result, Size};
 
-use types::{FloatManager, MarkerMap};
+use markers::DocumentMarkerState;
+use types::FloatManager;
 
 pub use types::{ClearSide, FloatSide, MultiColumnLayout};
 
@@ -31,7 +35,6 @@ pub struct LayoutEngine {
     pub(super) page_height: Length,
 
     /// Font registry for text measurement
-    #[allow(dead_code)]
     pub(super) font_registry: FontRegistry,
 
     /// Enable streaming mode for large documents
@@ -68,7 +71,7 @@ impl LayoutEngine {
     pub fn layout(&self, fo_tree: &FoArena) -> Result<AreaTree> {
         let mut area_tree = AreaTree::new();
         let mut resolver = PageNumberResolver::new();
-        let mut marker_map = MarkerMap::new();
+        let mut doc_markers = DocumentMarkerState::new();
 
         // First pass: Layout everything and track IDs
         if let Some((root_id, _)) = fo_tree.root() {
@@ -78,7 +81,7 @@ impl LayoutEngine {
                 &mut area_tree,
                 None,
                 &mut resolver,
-                &mut marker_map,
+                &mut doc_markers,
             )?;
         }
 
@@ -118,7 +121,7 @@ impl LayoutEngine {
         area_tree: &mut AreaTree,
         parent_area: Option<crate::area::AreaId>,
         resolver: &mut PageNumberResolver,
-        marker_map: &mut MarkerMap,
+        doc_markers: &mut DocumentMarkerState,
     ) -> Result<Option<crate::area::AreaId>> {
         let node = fo_tree
             .get(node_id)
@@ -135,7 +138,7 @@ impl LayoutEngine {
                         area_tree,
                         parent_area,
                         resolver,
-                        marker_map,
+                        doc_markers,
                     )?;
                 }
                 None
@@ -146,147 +149,12 @@ impl LayoutEngine {
                 None
             }
 
-            FoNodeData::PageSequence {
-                properties,
-                master_reference,
-                ..
-            } => {
-                // Determine page geometry from the simple-page-master
-                let master_ref = master_reference.clone();
-                let geom = self.extract_page_region_geometry(fo_tree, &master_ref);
-
-                // Create a page area (each page-sequence creates one page)
-                let page_rect = Rect::from_point_size(
-                    Point::ZERO,
-                    Size::new(geom.page_width, geom.page_height),
-                );
-
-                let mut traits = TraitSet::default();
-                if let Ok(color) = properties.get(PropertyId::BackgroundColor) {
-                    traits.background_color = color.as_color();
-                }
-
-                let area = Area::new(AreaType::Page, page_rect).with_traits(traits);
-                let area_id = area_tree.add_area(area);
-
-                // Register ID if present
-                if let Some(id) = &node.id {
-                    resolver.register_element(id.clone(), area_id);
-                }
-
-                // Process children (flow, static-content)
-                // First pass: collect static-content for all regions
-                let children = fo_tree.children(node_id);
-                let mut static_before_id = None;
-                let mut static_after_id = None;
-                let mut static_start_id = None;
-                let mut static_end_id = None;
-                let mut flow_id = None;
-
-                for child_id in children.clone() {
-                    if let Some(child) = fo_tree.get(child_id) {
-                        match &child.data {
-                            FoNodeData::StaticContent { flow_name, .. } => {
-                                match flow_name.as_str() {
-                                    "xsl-region-before" => static_before_id = Some(child_id),
-                                    "xsl-region-after" => static_after_id = Some(child_id),
-                                    "xsl-region-start" => static_start_id = Some(child_id),
-                                    "xsl-region-end" => static_end_id = Some(child_id),
-                                    _ => {}
-                                }
-                            }
-                            FoNodeData::Flow { .. } => {
-                                flow_id = Some(child_id);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Clear markers for the new page
-                marker_map.clear();
-
-                // First pass: Collect markers from the main flow
-                if let Some(flow_node_id) = flow_id {
-                    self.collect_markers(fo_tree, flow_node_id, marker_map);
-                }
-
-                // Layout header (static-content for region-before)
-                if let Some(header_id) = static_before_id {
-                    self.layout_static_content_in_rect(
-                        fo_tree,
-                        header_id,
-                        area_tree,
-                        area_id,
-                        geom.before_rect,
-                        AreaType::Header,
-                        resolver,
-                        marker_map,
-                    )?;
-                }
-
-                // Layout footer (static-content for region-after)
-                if let Some(footer_id) = static_after_id {
-                    self.layout_static_content_in_rect(
-                        fo_tree,
-                        footer_id,
-                        area_tree,
-                        area_id,
-                        geom.after_rect,
-                        AreaType::Footer,
-                        resolver,
-                        marker_map,
-                    )?;
-                }
-
-                // Layout start sidebar (static-content for region-start)
-                if let Some(start_id) = static_start_id {
-                    self.layout_static_content_in_rect(
-                        fo_tree,
-                        start_id,
-                        area_tree,
-                        area_id,
-                        geom.start_rect,
-                        AreaType::SidebarStart,
-                        resolver,
-                        marker_map,
-                    )?;
-                }
-
-                // Layout end sidebar (static-content for region-end)
-                if let Some(end_id) = static_end_id {
-                    self.layout_static_content_in_rect(
-                        fo_tree,
-                        end_id,
-                        area_tree,
-                        area_id,
-                        geom.end_rect,
-                        AreaType::SidebarEnd,
-                        resolver,
-                        marker_map,
-                    )?;
-                }
-
-                // Layout main content (flow) using the computed body rect
-                if let Some(flow_node_id) = flow_id {
-                    self.layout_flow_in_rect(
-                        fo_tree,
-                        flow_node_id,
-                        area_tree,
-                        area_id,
-                        geom.body_rect,
-                        resolver,
-                        marker_map,
-                    )?;
-                }
-
-                // Place collected footnotes at the bottom of the page body region
-                self.place_footnotes_for_page(area_tree, area_id, geom.body_rect)?;
-
-                // Increment page counter after processing this page
-                resolver.set_current_page(resolver.current_page() + 1);
-
-                Some(area_id)
+            FoNodeData::PageSequence { .. } => {
+                // Delegate to the pagination driver, which instantiates one or
+                // more pages from the page master, repeats the static-content
+                // regions on each, and lays out the flow with height-overflow
+                // pagination (reparenting overflowing blocks onto new pages).
+                self.layout_page_sequence(fo_tree, node_id, area_tree, resolver, doc_markers)?
             }
 
             FoNodeData::Flow { properties, .. } => {
@@ -401,154 +269,23 @@ impl LayoutEngine {
             }
 
             FoNodeData::Table { properties } => {
-                // Extract table-layout property
-                let layout_mode = if let Ok(prop) = properties.get(PropertyId::TableLayout) {
-                    if let Some(enum_val) = prop.as_enum() {
-                        // EN_AUTO = 9, EN_FIXED = 51
-                        if enum_val == 9 {
-                            TableLayoutMode::Auto
-                        } else {
-                            TableLayoutMode::Fixed
-                        }
-                    } else if prop.is_auto() {
-                        TableLayoutMode::Auto
-                    } else {
-                        TableLayoutMode::Fixed
-                    }
-                } else {
-                    TableLayoutMode::Fixed // Default
-                };
-
-                // Extract border-collapse property
-                let border_collapse = if let Ok(prop) = properties.get(PropertyId::BorderCollapse) {
-                    if let Some(enum_val) = prop.as_enum() {
-                        // EN_SEPARATE = 102, EN_COLLAPSE = 28
-                        if enum_val == 28 {
-                            BorderCollapse::Collapse
-                        } else {
-                            BorderCollapse::Separate
-                        }
-                    } else if let Some(string_val) = prop.as_string() {
-                        if string_val == "collapse" {
-                            BorderCollapse::Collapse
-                        } else {
-                            BorderCollapse::Separate
-                        }
-                    } else {
-                        BorderCollapse::Separate
-                    }
-                } else {
-                    BorderCollapse::Separate // Default
-                };
-
-                // Extract border-spacing property (only used for separate borders)
-                let border_spacing = if let Ok(prop) = properties.get(PropertyId::BorderSpacing) {
-                    prop.as_length().unwrap_or(Length::from_pt(0.0))
-                } else {
-                    Length::from_pt(0.0) // Default per XSL-FO spec
-                };
-
-                // Create table layout
-                let available_width = self.page_width - Length::from_pt(144.0); // 1 inch margins
-                let table_layout = TableLayout::new(available_width)
-                    .with_border_spacing(border_spacing)
-                    .with_layout_mode(layout_mode)
-                    .with_border_collapse(border_collapse);
-
-                // Extract column definitions and separate table sections
-                let children = fo_tree.children(node_id);
-                let mut column_widths = Vec::new();
-                let mut header_id = None;
-                let mut footer_id = None;
-                let mut body_ids = Vec::new();
-
-                for child_id in children.clone() {
-                    if let Some(child) = fo_tree.get(child_id) {
-                        match &child.data {
-                            FoNodeData::TableColumn { .. } => {
-                                // Parse column width from properties
-                                if let Some(props) = child.data.properties() {
-                                    if let Ok(width) = props.get(PropertyId::ColumnWidth) {
-                                        if let Some(len) = width.as_length() {
-                                            column_widths.push(ColumnWidth::Fixed(len));
-                                        } else if width.is_auto() {
-                                            column_widths.push(ColumnWidth::Auto);
-                                        }
-                                    } else {
-                                        column_widths.push(ColumnWidth::Auto);
-                                    }
-                                }
-                            }
-                            FoNodeData::TableHeader { .. } => {
-                                header_id = Some(child_id);
-                            }
-                            FoNodeData::TableFooter { .. } => {
-                                footer_id = Some(child_id);
-                            }
-                            FoNodeData::TableBody { .. } => {
-                                body_ids.push(child_id);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // If no explicit columns, use proportional layout
-                if column_widths.is_empty() {
-                    column_widths.push(ColumnWidth::Proportional(1.0));
-                }
-
-                // Compute column widths based on layout mode
-                let computed_widths = match layout_mode {
-                    TableLayoutMode::Fixed => table_layout.compute_fixed_widths(&column_widths),
-                    TableLayoutMode::Auto => {
-                        // For auto layout, we need to create ColumnInfo with measurements
-                        let mut column_info: Vec<ColumnInfo> = column_widths
-                            .iter()
-                            .map(|width_spec| ColumnInfo::new(width_spec.clone()))
-                            .collect();
-
-                        // Build grid to measure content (simplified - in full implementation
-                        // would need actual cell content measurements)
-                        let grid = table_layout.create_grid(1, column_info.len());
-                        table_layout.update_column_info_from_grid(&mut column_info, &grid);
-
-                        table_layout.compute_auto_widths(&column_info)
-                    }
-                };
-
-                // Create table area
-                let table_height = Length::from_pt(100.0); // Placeholder
-                let table_rect =
-                    Rect::new(Length::ZERO, Length::ZERO, available_width, table_height);
-
-                let mut traits = TraitSet::default();
-                if let Ok(color) = properties.get(PropertyId::BackgroundColor) {
-                    traits.background_color = color.as_color();
-                }
-
-                let area = Area::new(AreaType::Block, table_rect).with_traits(traits);
-                let table_id = area_tree.add_area(area);
-
-                if let Some(parent) = parent_area {
-                    area_tree
-                        .append_child(parent, table_id)
-                        .map_err(fop_types::FopError::Generic)?;
-                }
-
-                // Layout table with header, body, and footer
-                self.layout_table(
+                // Tables reached directly through layout_node (e.g. a child of
+                // fo:root or fo:block-container) lay out at the region origin and
+                // span the body's content width.  Tables that appear inside an
+                // fo:flow are routed through layout_block (block_layout.rs) so they
+                // stack with surrounding blocks at the correct y-offset; both paths
+                // share layout_table_node, including content-measured auto widths.
+                let available_width = self.page_width - Length::from_pt(144.0);
+                self.layout_table_node(
                     fo_tree,
+                    node_id,
+                    properties,
                     area_tree,
-                    table_id,
-                    header_id,
-                    footer_id,
-                    &body_ids,
-                    &computed_widths,
+                    parent_area,
+                    available_width,
+                    Length::ZERO,
                     resolver,
-                )?;
-
-                Some(table_id)
+                )?
             }
 
             FoNodeData::ExternalGraphic {
@@ -777,7 +514,7 @@ impl LayoutEngine {
                         area_tree,
                         parent_area,
                         resolver,
-                        marker_map,
+                        doc_markers,
                     )?;
                 }
                 None
@@ -1831,6 +1568,312 @@ mod tests {
         assert!(has_sidebar_start, "Should have a sidebar-start area");
         assert!(has_sidebar_end, "Should have a sidebar-end area");
         assert!(has_region, "Should have a body region area");
+    }
+
+    /// Verify that the outer table `Block` area's height equals the sum of all row
+    /// heights after layout, not the old hard-coded 100pt placeholder.
+    ///
+    /// Setup: fo:root → fo:table → fo:table-body → 5×(fo:table-row → fo:table-cell)
+    ///
+    /// The Root handler in `layout_node` dispatches each child directly through
+    /// `layout_node`, which reaches the `FoNodeData::Table` arm and calls
+    /// `layout_table`.  The default `row_height` in `layout_table_body` is 30pt,
+    /// so 5 rows → 150pt total.
+    #[test]
+    fn test_table_outer_area_height_matches_row_count() {
+        let mut fo_tree = FoArena::new();
+
+        // Root → Table: Root's handler calls layout_node on every direct child, which
+        // routes through the FoNodeData::Table arm (and then layout_table).
+        let root = fo_tree.add_node(FoNode::new(FoNodeData::Root));
+
+        let table = fo_tree.add_node(FoNode::new(FoNodeData::Table {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(root, table)
+            .expect("test: should succeed");
+
+        // Create fo:table-body with 5 rows, each having one cell.
+        let table_body = fo_tree.add_node(FoNode::new(FoNodeData::TableBody {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(table, table_body)
+            .expect("test: should succeed");
+
+        const ROW_COUNT: usize = 5;
+        // Default row_height in layout_table_body is 30pt → 5 rows = 150pt.
+        let default_row_height_pt = 30.0_f64;
+        let expected_table_height = Length::from_pt(default_row_height_pt * ROW_COUNT as f64);
+
+        for _ in 0..ROW_COUNT {
+            let row = fo_tree.add_node(FoNode::new(FoNodeData::TableRow {
+                properties: PropertyList::new(),
+            }));
+            fo_tree
+                .append_child(table_body, row)
+                .expect("test: should succeed");
+
+            let cell = fo_tree.add_node(FoNode::new(FoNodeData::TableCell {
+                properties: PropertyList::new(),
+            }));
+            fo_tree
+                .append_child(row, cell)
+                .expect("test: should succeed");
+        }
+
+        let engine = LayoutEngine::new();
+        let area_tree = engine.layout(&fo_tree).expect("test: should succeed");
+
+        // The outer table area is the Block whose height must equal ROW_COUNT × 30pt.
+        // Row areas and cell areas each have 30pt height.
+        let mut found_correct_height = false;
+        let mut found_old_placeholder = false;
+        let mut block_heights: Vec<f64> = Vec::new();
+
+        for (_, node) in area_tree.iter() {
+            if matches!(node.area.area_type, AreaType::Block) {
+                let h_pt = node.area.geometry.height.to_pt();
+                block_heights.push(h_pt);
+
+                if (node.area.geometry.height - expected_table_height)
+                    .to_pt()
+                    .abs()
+                    < 0.001
+                {
+                    found_correct_height = true;
+                }
+                // 100pt was the old hard-coded placeholder value — must no longer appear.
+                if (h_pt - 100.0_f64).abs() < 0.001 {
+                    found_old_placeholder = true;
+                }
+            }
+        }
+
+        assert!(
+            found_correct_height,
+            "Expected a Block area with height ≈{expected_pt}pt ({row_count}×{row_h}pt rows), \
+             but found Block heights: {heights:?}",
+            expected_pt = expected_table_height.to_pt(),
+            row_count = ROW_COUNT,
+            row_h = default_row_height_pt,
+            heights = block_heights,
+        );
+        assert!(
+            !found_old_placeholder,
+            "Found a Block area still at the old placeholder height of 100pt; \
+             the fix did not propagate correctly. Block heights: {block_heights:?}",
+        );
+    }
+
+    /// Append `<fo:table-cell><fo:block>text</fo:block></fo:table-cell>` to `row`.
+    fn add_table_cell(fo: &mut FoArena<'static>, row: NodeId, text: &str) {
+        let cell = fo.add_node(FoNode::new(FoNodeData::TableCell {
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(row, cell).expect("test: append cell");
+        let block = fo.add_node(FoNode::new(FoNodeData::Block {
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(cell, block).expect("test: append block");
+        let t = fo.add_node(FoNode::new(FoNodeData::Text(text.to_string())));
+        fo.append_child(block, t).expect("test: append text");
+    }
+
+    /// The two cell-area widths of a single-row, two-cell table, ordered by
+    /// x-position (left cell first).  The row is the only `Block` area with
+    /// exactly two `Block` children: cells hold a single content block, the table
+    /// holds a single row, and wrapped text lines are `Text` areas, not `Block`s.
+    fn single_row_cell_widths(tree: &AreaTree) -> Option<(Length, Length)> {
+        for (id, node) in tree.iter() {
+            if node.area.area_type != AreaType::Block {
+                continue;
+            }
+            let mut cells: Vec<(f64, Length)> = tree
+                .children(id)
+                .into_iter()
+                .filter_map(|c| tree.get(c))
+                .filter(|n| n.area.area_type == AreaType::Block)
+                .map(|n| (n.area.geometry.x.to_pt(), n.area.width()))
+                .collect();
+            if cells.len() == 2 {
+                cells.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                return Some((cells[0].1, cells[1].1));
+            }
+        }
+        None
+    }
+
+    /// GAP 2 + GAP 1, end-to-end: a `table-layout="auto"` table that is a direct
+    /// child of `fo:flow` must actually produce a table area (the flow dispatch
+    /// used to drop it) and size its columns to content, so the short "Hi" column
+    /// is narrower than the long-text column while the two together fill the table.
+    #[test]
+    fn test_auto_table_in_flow_renders_and_sizes_columns() {
+        let mut fo = FoArena::new();
+        let root = fo.add_node(FoNode::new(FoNodeData::Root));
+
+        // layout-master-set / simple-page-master (400×600pt, zero margins).
+        let lms = fo.add_node(FoNode::new(FoNodeData::LayoutMasterSet));
+        fo.append_child(root, lms).expect("test: lms");
+        let mut spm_props = PropertyList::new();
+        spm_props.set(
+            PropertyId::PageWidth,
+            PropertyValue::Length(Length::from_pt(400.0)),
+        );
+        spm_props.set(
+            PropertyId::PageHeight,
+            PropertyValue::Length(Length::from_pt(600.0)),
+        );
+        for m in [
+            PropertyId::MarginTop,
+            PropertyId::MarginBottom,
+            PropertyId::MarginLeft,
+            PropertyId::MarginRight,
+        ] {
+            spm_props.set(m, PropertyValue::Length(Length::ZERO));
+        }
+        let spm = fo.add_node(FoNode::new(FoNodeData::SimplePageMaster {
+            master_name: "pm".to_string(),
+            properties: spm_props,
+        }));
+        fo.append_child(lms, spm).expect("test: spm");
+        let body = fo.add_node(FoNode::new(FoNodeData::RegionBody {
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(spm, body).expect("test: region-body");
+
+        // page-sequence → flow → table(auto, 2 columns, short + long cell).
+        let ps = fo.add_node(FoNode::new(FoNodeData::PageSequence {
+            master_reference: "pm".to_string(),
+            format: "1".to_string(),
+            grouping_separator: None,
+            grouping_size: None,
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(root, ps).expect("test: page-sequence");
+        let flow = fo.add_node(FoNode::new(FoNodeData::Flow {
+            flow_name: "xsl-region-body".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(ps, flow).expect("test: flow");
+
+        let mut table_props = PropertyList::new();
+        table_props.set(PropertyId::TableLayout, PropertyValue::Enum(9)); // auto
+        let table = fo.add_node(FoNode::new(FoNodeData::Table {
+            properties: table_props,
+        }));
+        fo.append_child(flow, table).expect("test: table");
+        for _ in 0..2 {
+            let col = fo.add_node(FoNode::new(FoNodeData::TableColumn {
+                properties: PropertyList::new(),
+            }));
+            fo.append_child(table, col).expect("test: column");
+        }
+        let tbody = fo.add_node(FoNode::new(FoNodeData::TableBody {
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(table, tbody).expect("test: tbody");
+        let row = fo.add_node(FoNode::new(FoNodeData::TableRow {
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(tbody, row).expect("test: row");
+        add_table_cell(&mut fo, row, "Hi");
+        add_table_cell(
+            &mut fo,
+            row,
+            "a much longer cell value that needs more width",
+        );
+
+        let engine = LayoutEngine::new();
+        let area_tree = engine.layout(&fo).expect("test: layout");
+
+        // (a) GAP 2: the flow produced a table area — a Block child of a Region.
+        let region = area_tree
+            .iter()
+            .find(|(_, n)| n.area.area_type == AreaType::Region)
+            .map(|(id, _)| id)
+            .expect("test: a region-body area must exist");
+        let table_area = area_tree
+            .children(region)
+            .into_iter()
+            .find(|c| {
+                area_tree
+                    .get(*c)
+                    .map(|n| n.area.area_type == AreaType::Block)
+                    .unwrap_or(false)
+            })
+            .expect("GAP 2: a table inside fo:flow must produce a table area");
+        let table_w = area_tree
+            .get(table_area)
+            .expect("test: table area node")
+            .area
+            .width();
+        assert!(table_w > Length::ZERO, "table area must have a width");
+
+        // (b) GAP 1: columns are content-sized — short < long — and fill the table.
+        let (w_a, w_b) = single_row_cell_widths(&area_tree).expect("test: two cell areas expected");
+        assert!(
+            w_a < w_b,
+            "auto layout: short column {:?} must be narrower than long column {:?}",
+            w_a,
+            w_b
+        );
+        let sum = w_a + w_b;
+        assert!(
+            (sum.to_pt() - table_w.to_pt()).abs() < 0.1,
+            "auto columns ({:?}) must fill the table width {:?}",
+            sum,
+            table_w
+        );
+    }
+
+    /// `table-layout="fixed"` is unaffected by the auto-measurement work: two
+    /// undeclared-width columns still receive an equal share of the table width,
+    /// even though one cell holds far more text than the other.
+    #[test]
+    fn test_fixed_table_columns_remain_equal_split() {
+        let mut fo = FoArena::new();
+        let root = fo.add_node(FoNode::new(FoNodeData::Root));
+
+        let mut table_props = PropertyList::new();
+        table_props.set(PropertyId::TableLayout, PropertyValue::Enum(51)); // fixed
+        let table = fo.add_node(FoNode::new(FoNodeData::Table {
+            properties: table_props,
+        }));
+        fo.append_child(root, table).expect("test: table");
+        for _ in 0..2 {
+            let col = fo.add_node(FoNode::new(FoNodeData::TableColumn {
+                properties: PropertyList::new(),
+            }));
+            fo.append_child(table, col).expect("test: column");
+        }
+        let tbody = fo.add_node(FoNode::new(FoNodeData::TableBody {
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(table, tbody).expect("test: tbody");
+        let row = fo.add_node(FoNode::new(FoNodeData::TableRow {
+            properties: PropertyList::new(),
+        }));
+        fo.append_child(tbody, row).expect("test: row");
+        add_table_cell(&mut fo, row, "Hi");
+        add_table_cell(
+            &mut fo,
+            row,
+            "a much longer cell value that needs more width",
+        );
+
+        let engine = LayoutEngine::new();
+        let area_tree = engine.layout(&fo).expect("test: layout");
+
+        let (w_a, w_b) = single_row_cell_widths(&area_tree).expect("test: two cell areas expected");
+        assert!(
+            (w_a.to_pt() - w_b.to_pt()).abs() < 0.1,
+            "fixed layout must split columns equally regardless of content: {:?} vs {:?}",
+            w_a,
+            w_b
+        );
     }
 
     /// Parse a length string like "10mm", "72pt", "1.5in" to a Length value

@@ -5,7 +5,7 @@
 
 use crate::error::Result;
 use crate::font::LoadedFont;
-use crate::graphics::{Color, CurrentPath, GraphicsStateStack, Matrix};
+use crate::graphics::{ClipPath, ClipState, Color, CurrentPath, GraphicsStateStack, Matrix};
 use crate::image::DecodedImage;
 use crate::parser::{PdfDictionary, PdfDocument};
 use crate::text::{decode_string_to_cids, PositionedGlyph, TextState};
@@ -273,7 +273,13 @@ fn pop_name(stack: &mut Vec<Token>) -> String {
 // DrawCommand — output of the interpreter
 // ---------------------------------------------------------------------------
 
-/// A drawing command produced by interpreting the content stream
+/// A drawing command produced by interpreting the content stream.
+///
+/// Every paintable command carries the [`ClipState`] that was active in the
+/// graphics state at the moment it was emitted. Because the interpreter fully
+/// resolves `q`/`Q` (and therefore the clip stack) while producing this flat
+/// command list, the clip must travel with each command — exactly like the
+/// already-resolved color and CTM-transformed path do.
 #[derive(Debug)]
 pub enum DrawCommand {
     /// Fill a path with the given color
@@ -281,19 +287,29 @@ pub enum DrawCommand {
         path: tiny_skia::Path,
         color: Color,
         fill_rule: FillRule,
+        /// Clipping region active when this fill was emitted.
+        clip: ClipState,
     },
     /// Stroke a path
     StrokePath {
         path: tiny_skia::Path,
         color: Color,
         width: f32,
+        /// Clipping region active when this stroke was emitted.
+        clip: ClipState,
     },
     /// Render a glyph
-    DrawGlyph(PositionedGlyph),
+    DrawGlyph {
+        glyph: PositionedGlyph,
+        /// Clipping region active when this glyph was emitted.
+        clip: ClipState,
+    },
     /// Render an image
     DrawImage {
         image: DecodedImage,
         transform: Matrix,
+        /// Clipping region active when this image was emitted.
+        clip: ClipState,
     },
 }
 
@@ -314,6 +330,11 @@ pub struct ContentInterpreter<'a> {
     gs_stack: GraphicsStateStack,
     text_state: TextState,
     path: CurrentPath,
+    /// Pending clip request set by `W`/`W*`. Per PDF spec §8.5.4 the current
+    /// path becomes part of the clip only *after* the next path-painting
+    /// operator runs; `Some(even_odd)` records the requested fill rule until
+    /// then. `None` means no clip is pending.
+    pending_clip: Option<bool>,
     /// Loaded fonts cache: resource name → LoadedFont
     font_cache: HashMap<String, LoadedFont>,
     /// Page height for Y-flip (PDF Y=0 is bottom, screen Y=0 is top)
@@ -328,6 +349,7 @@ impl<'a> ContentInterpreter<'a> {
             gs_stack: GraphicsStateStack::default(),
             text_state: TextState::default(),
             path: CurrentPath::default(),
+            pending_clip: None,
             font_cache: HashMap::new(),
             page_height,
         }
@@ -545,9 +567,10 @@ impl<'a> ContentInterpreter<'a> {
                         path,
                         color: state.stroke_color,
                         width: state.line_width,
+                        clip: state.clip.clone(),
                     });
                 }
-                self.path.clear();
+                self.finish_path();
             }
             "s" => {
                 // Close and stroke
@@ -558,9 +581,10 @@ impl<'a> ContentInterpreter<'a> {
                         path,
                         color: state.stroke_color,
                         width: state.line_width,
+                        clip: state.clip.clone(),
                     });
                 }
-                self.path.clear();
+                self.finish_path();
             }
             "f" | "F" => {
                 if let Some(path) = self.build_path() {
@@ -569,9 +593,10 @@ impl<'a> ContentInterpreter<'a> {
                         path,
                         color: state.fill_color,
                         fill_rule: FillRule::NonZero,
+                        clip: state.clip.clone(),
                     });
                 }
-                self.path.clear();
+                self.finish_path();
             }
             "f*" => {
                 if let Some(path) = self.build_path() {
@@ -580,67 +605,67 @@ impl<'a> ContentInterpreter<'a> {
                         path,
                         color: state.fill_color,
                         fill_rule: FillRule::EvenOdd,
+                        clip: state.clip.clone(),
                     });
                 }
-                self.path.clear();
+                self.finish_path();
             }
-            "B" => {
-                // Fill and stroke
+            "B" | "b" => {
+                // Fill and stroke (closed first for `b`)
+                if op == "b" {
+                    self.path.close();
+                }
                 if let Some(path) = self.build_path() {
                     let state = self.gs_stack.current();
                     commands.push(DrawCommand::FillPath {
                         path: path.clone(),
                         color: state.fill_color,
                         fill_rule: FillRule::NonZero,
+                        clip: state.clip.clone(),
                     });
                     commands.push(DrawCommand::StrokePath {
                         path,
                         color: state.stroke_color,
                         width: state.line_width,
+                        clip: state.clip.clone(),
                     });
                 }
-                self.path.clear();
+                self.finish_path();
             }
-            "B*" => {
+            "B*" | "b*" => {
+                // Even-odd fill and stroke (closed first for `b*`)
+                if op == "b*" {
+                    self.path.close();
+                }
                 if let Some(path) = self.build_path() {
                     let state = self.gs_stack.current();
                     commands.push(DrawCommand::FillPath {
                         path: path.clone(),
                         color: state.fill_color,
                         fill_rule: FillRule::EvenOdd,
+                        clip: state.clip.clone(),
                     });
                     commands.push(DrawCommand::StrokePath {
                         path,
                         color: state.stroke_color,
                         width: state.line_width,
+                        clip: state.clip.clone(),
                     });
                 }
-                self.path.clear();
-            }
-            "b" => {
-                self.path.close();
-                if let Some(path) = self.build_path() {
-                    let state = self.gs_stack.current();
-                    commands.push(DrawCommand::FillPath {
-                        path: path.clone(),
-                        color: state.fill_color,
-                        fill_rule: FillRule::NonZero,
-                    });
-                    commands.push(DrawCommand::StrokePath {
-                        path,
-                        color: state.stroke_color,
-                        width: state.line_width,
-                    });
-                }
-                self.path.clear();
+                self.finish_path();
             }
             "n" => {
-                // End path without painting
-                self.path.clear();
+                // End path without painting — applies any pending W/W* clip.
+                self.finish_path();
             }
-            "W" | "W*" => {
-                // Clip — skip for now
-                self.path.clear();
+            "W" => {
+                // Mark the current path as a nonzero-winding clip; it takes
+                // effect after the following path-painting operator.
+                self.pending_clip = Some(false);
+            }
+            "W*" => {
+                // Mark the current path as an even-odd clip.
+                self.pending_clip = Some(true);
             }
 
             // --------------- Text ---------------
@@ -793,6 +818,30 @@ impl<'a> ContentInterpreter<'a> {
         }
     }
 
+    /// Finish a path-painting operator: apply any pending `W`/`W*` clip using
+    /// the just-painted path, then clear the current path. Every painting
+    /// operator (`S s f F f* B B* b b* n`) ends here so the clip established by
+    /// a preceding `W`/`W*` takes effect *after* the paint, per PDF §8.5.4.
+    fn finish_path(&mut self) {
+        self.apply_pending_clip();
+        self.path.clear();
+    }
+
+    /// If a `W`/`W*` clip is pending, intersect the current path (already in
+    /// screen space) into the current graphics state's clip region. The clip is
+    /// stored in the graphics state, so a later `Q` restores the prior region.
+    fn apply_pending_clip(&mut self) {
+        let Some(even_odd) = self.pending_clip.take() else {
+            return;
+        };
+        if let Some(path) = self.build_path() {
+            self.gs_stack
+                .current_mut()
+                .clip
+                .intersect(ClipPath { path, even_odd });
+        }
+    }
+
     fn ensure_font_loaded(&mut self) {
         let name = self.text_state.font_name.clone();
         if self.font_cache.contains_key(&name) {
@@ -815,6 +864,7 @@ impl<'a> ContentInterpreter<'a> {
         let cids = decode_string_to_cids(bytes, is_composite);
         let ctm = self.gs_stack.current().ctm;
         let fill_color = self.gs_stack.current().fill_color;
+        let clip = self.gs_stack.current().clip.clone();
 
         for cid in cids {
             // Get current text position in user space
@@ -849,16 +899,19 @@ impl<'a> ContentInterpreter<'a> {
 
             let is_space = character == Some(' ');
 
-            commands.push(DrawCommand::DrawGlyph(PositionedGlyph {
-                x: px,
-                y: sy,
-                font_size,
-                character,
-                cid,
-                font_name: font_name.clone(),
-                advance: (advance_units / 1000.0) * self.text_state.font_size,
-                color: fill_color,
-            }));
+            commands.push(DrawCommand::DrawGlyph {
+                glyph: PositionedGlyph {
+                    x: px,
+                    y: sy,
+                    font_size,
+                    character,
+                    cid,
+                    font_name: font_name.clone(),
+                    advance: (advance_units / 1000.0) * self.text_state.font_size,
+                    color: fill_color,
+                },
+                clip: clip.clone(),
+            });
 
             // Advance text matrix
             self.text_state.advance(advance_units, is_space);
@@ -871,10 +924,11 @@ impl<'a> ContentInterpreter<'a> {
             if subtype == "Image" {
                 match crate::image::DecodedImage::decode(&dict, &data) {
                     Ok(img) => {
-                        let ctm = self.gs_stack.current().ctm;
+                        let state = self.gs_stack.current();
                         commands.push(DrawCommand::DrawImage {
                             image: img,
-                            transform: ctm,
+                            transform: state.ctm,
+                            clip: state.clip.clone(),
                         });
                     }
                     Err(e) => {
@@ -1473,7 +1527,9 @@ mod tests {
         let content = b"BT ET\n";
         let cmds = interpret_content(content);
         assert!(
-            !cmds.iter().any(|c| matches!(c, DrawCommand::DrawGlyph(_))),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, DrawCommand::DrawGlyph { .. })),
             "No glyphs without font"
         );
     }
@@ -1567,6 +1623,111 @@ mod tests {
             cmds.iter()
                 .any(|c| matches!(c, DrawCommand::StrokePath { .. })),
             "Expected StrokePath from 's' operator"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Clipping (W / W*) — PDF spec §8.5.4 sequencing
+    // -----------------------------------------------------------------------
+
+    /// Collect the clip state of every emitted `FillPath` command, in order.
+    fn fill_clips(cmds: &[DrawCommand]) -> Vec<&ClipState> {
+        cmds.iter()
+            .filter_map(|c| {
+                if let DrawCommand::FillPath { clip, .. } = c {
+                    Some(clip)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_interpret_fill_without_clip_is_unclipped() {
+        // Regression: an ordinary fill carries no clip (mask-free, as before).
+        let cmds = interpret_content(b"0 0 0 rg 10 10 50 50 re f\n");
+        let clips = fill_clips(&cmds);
+        assert_eq!(clips.len(), 1);
+        assert!(
+            clips[0].is_unclipped(),
+            "a fill with no preceding W must be unclipped"
+        );
+    }
+
+    #[test]
+    fn test_interpret_w_n_establishes_clip_for_following_fill() {
+        // `re W n` sets the clip; the subsequent fill must carry it.
+        let content = b"50 50 100 100 re W n 0 0 0 rg 0 0 600 700 re f\n";
+        let cmds = interpret_content(content);
+        let clips = fill_clips(&cmds);
+        assert_eq!(clips.len(), 1);
+        assert!(
+            !clips[0].is_unclipped(),
+            "a fill after `re W n` must be clipped"
+        );
+        assert_eq!(clips[0].paths().len(), 1, "exactly one clip outline");
+    }
+
+    #[test]
+    fn test_interpret_w_clip_takes_effect_after_paint_operator() {
+        // Per §8.5.4 the clip applies AFTER the painting operator that follows
+        // W. So in `re W f`, the fill itself uses the prior (empty) clip; only a
+        // SUBSEQUENT fill sees the new clip.
+        let content = b"50 50 100 100 re W f 0 0 100 100 re f\n";
+        let cmds = interpret_content(content);
+        let clips = fill_clips(&cmds);
+        assert_eq!(clips.len(), 2);
+        assert!(
+            clips[0].is_unclipped(),
+            "the W-painting fill uses the prior (empty) clip"
+        );
+        assert!(
+            !clips[1].is_unclipped(),
+            "the following fill is clipped by the W path"
+        );
+    }
+
+    #[test]
+    fn test_interpret_w_star_records_even_odd_clip() {
+        let content = b"50 50 100 100 re W* n 0 0 0 rg 0 0 600 700 re f\n";
+        let cmds = interpret_content(content);
+        let clips = fill_clips(&cmds);
+        assert_eq!(clips.len(), 1);
+        let paths = clips[0].paths();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].even_odd, "W* must record an even-odd clip outline");
+    }
+
+    #[test]
+    fn test_interpret_clip_saved_and_restored_by_q_q() {
+        // q ... re W n ... f(clipped) ... Q ... f(unclipped)
+        let content = b"q 50 50 100 100 re W n 0 0 0 rg 0 0 600 700 re f Q 0 0 600 700 re f\n";
+        let cmds = interpret_content(content);
+        let clips = fill_clips(&cmds);
+        assert_eq!(clips.len(), 2);
+        assert!(
+            !clips[0].is_unclipped(),
+            "fill inside q (after the clip) is clipped"
+        );
+        assert!(
+            clips[1].is_unclipped(),
+            "fill after Q is unclipped — Q restored the prior clip"
+        );
+    }
+
+    #[test]
+    fn test_interpret_nested_clips_intersect() {
+        // Two nested clips accumulate (intersection), so the inner fill carries
+        // both outlines.
+        let content = b"10 10 180 180 re W n 50 50 100 100 re W n 0 0 0 rg 0 0 600 700 re f\n";
+        let cmds = interpret_content(content);
+        let clips = fill_clips(&cmds);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(
+            clips[0].paths().len(),
+            2,
+            "two W clips must intersect into two outlines"
         );
     }
 }

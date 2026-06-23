@@ -6,7 +6,7 @@
 use crate::area::{Area, AreaTree, AreaType, TraitSet};
 use crate::layout::{
     extract_space_after, extract_space_before, extract_traits, BlockLayoutContext,
-    PageNumberResolver, TextAlign,
+    KnuthPlassBreaker, PageNumberResolver, TextAlign,
 };
 use fop_core::{FoArena, FoNodeData, NodeId, PropertyId};
 use fop_types::{FontRegistry, Length, Point, Rect, Result, Size};
@@ -232,26 +232,56 @@ impl StreamingLayoutEngine {
                     .map_err(fop_types::FopError::Generic)?;
 
                 let text_align = traits.text_align.unwrap_or(TextAlign::Left);
+                let justify = matches!(text_align, TextAlign::Justify);
 
-                // Process text children
+                // Process text children, breaking each run into optimal lines
+                // (Knuth-Plass) and stacking one area per line.
                 let children = fo_tree.children(node_id);
+                let mut content_y = Length::ZERO;
                 for child_id in children {
                     if let Some(child_node) = fo_tree.get(child_id) {
                         if let FoNodeData::Text(text) = &child_node.data {
                             let mut text_traits = traits.clone();
                             text_traits.text_align = Some(text_align);
 
-                            let text_rect =
-                                Rect::new(Length::ZERO, Length::ZERO, available_width, line_height);
+                            let breaker =
+                                KnuthPlassBreaker::new(available_width).with_justify(justify);
+                            let lines = breaker.break_into_lines(text, &text_traits);
+                            let line_count = lines.len();
+                            for (i, line) in lines.iter().enumerate() {
+                                let natural = line.natural_width;
+                                let is_last = i + 1 == line_count;
+                                let (x, width) = match text_align {
+                                    TextAlign::Left => (Length::ZERO, natural),
+                                    TextAlign::Right => (available_width - natural, natural),
+                                    TextAlign::Center => ((available_width - natural) / 2, natural),
+                                    TextAlign::Justify => {
+                                        if is_last {
+                                            (Length::ZERO, natural)
+                                        } else {
+                                            (Length::ZERO, available_width)
+                                        }
+                                    }
+                                };
 
-                            let text_area =
-                                Area::text(text_rect, text.clone()).with_traits(text_traits);
-                            let text_id = area_tree.add_area(text_area);
-                            area_tree
-                                .append_child(area_id, text_id)
-                                .map_err(fop_types::FopError::Generic)?;
+                                let text_rect = Rect::new(x, content_y, width, line_height);
+                                let text_area = Area::text(text_rect, line.text.clone())
+                                    .with_traits(text_traits.clone());
+                                let text_id = area_tree.add_area(text_area);
+                                area_tree
+                                    .append_child(area_id, text_id)
+                                    .map_err(fop_types::FopError::Generic)?;
+
+                                content_y += line_height;
+                            }
                         }
                     }
+                }
+
+                // Resolve the block's true content height (one line minimum).
+                let content_height = content_y.max(line_height);
+                if let Some(block_node) = area_tree.get_mut(area_id) {
+                    block_node.area.geometry.height = content_height;
                 }
 
                 // Register ID if present

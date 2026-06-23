@@ -7,6 +7,7 @@
 use crate::content::{ContentInterpreter, DrawCommand, FillRule};
 use crate::error::{PdfRenderError, Result};
 use crate::glyph::{self, OutlinePathBuilder};
+use crate::graphics::ClipState;
 use crate::parser::{PdfDictionary, PdfDocument, PdfPage};
 use std::collections::HashMap;
 
@@ -66,6 +67,11 @@ pub struct PageRasterizer<'a> {
     doc: &'a PdfDocument,
     /// Font cache: PDF resource name (e.g. "F1") → loaded font+bytes, or None if unavailable.
     font_cache: HashMap<String, Option<LoadedFontExt>>,
+    /// Memoized clip mask for the most recently drawn clip region. Consecutive
+    /// draw commands that share the same clip (by pointer identity) reuse the
+    /// built [`tiny_skia::Mask`] instead of rebuilding it per command. Reset at
+    /// the start of every [`PageRasterizer::render`] call.
+    clip_cache: Option<(ClipState, tiny_skia::Mask)>,
 }
 
 impl<'a> PageRasterizer<'a> {
@@ -73,11 +79,17 @@ impl<'a> PageRasterizer<'a> {
         Self {
             doc,
             font_cache: HashMap::new(),
+            clip_cache: None,
         }
     }
 
     /// Render a page at the given DPI
     pub fn render(&mut self, page: &PdfPage, dpi: f32) -> Result<RasterPage> {
+        // The clip mask is sized to (and transformed for) this render's pixmap;
+        // drop any mask cached from a previous page/DPI so it is never reused
+        // across differing dimensions.
+        self.clip_cache = None;
+
         // PDF points are 1/72 inch. At `dpi`, 1pt = dpi/72 pixels.
         let scale = dpi / 72.0;
 
@@ -112,7 +124,7 @@ impl<'a> PageRasterizer<'a> {
         // Pre-populate font cache by scanning all DrawGlyph commands.
         // This avoids needing page resources inside execute_command.
         for cmd in &commands {
-            if let DrawCommand::DrawGlyph(g) = cmd {
+            if let DrawCommand::DrawGlyph { glyph: g, .. } = cmd {
                 if !self.font_cache.contains_key(&g.font_name) {
                     let ext = self.load_font_ext(&page.resources, &g.font_name);
                     self.font_cache.insert(g.font_name.clone(), ext);
@@ -164,12 +176,16 @@ impl<'a> PageRasterizer<'a> {
         scale: f32,
         base_transform: &tiny_skia::Transform,
     ) -> Result<()> {
+        let (px_w, px_h) = (pixmap.width(), pixmap.height());
         match cmd {
             DrawCommand::FillPath {
                 path,
                 color,
                 fill_rule,
+                clip,
             } => {
+                self.ensure_clip_mask(&clip, px_w, px_h, base_transform);
+                let mask = self.active_mask(&clip);
                 let skia_color = color.to_tiny_skia_color();
                 let paint = paint_from_color(skia_color);
                 let fill_rule = match fill_rule {
@@ -184,12 +200,19 @@ impl<'a> PageRasterizer<'a> {
                         &paint,
                         fill_rule,
                         tiny_skia::Transform::identity(),
-                        None,
+                        mask,
                     );
                 }
             }
 
-            DrawCommand::StrokePath { path, color, width } => {
+            DrawCommand::StrokePath {
+                path,
+                color,
+                width,
+                clip,
+            } => {
+                self.ensure_clip_mask(&clip, px_w, px_h, base_transform);
+                let mask = self.active_mask(&clip);
                 let skia_color = color.to_tiny_skia_color();
                 let paint = paint_from_color(skia_color);
                 let stroke = tiny_skia::Stroke {
@@ -203,12 +226,16 @@ impl<'a> PageRasterizer<'a> {
                         &paint,
                         &stroke,
                         tiny_skia::Transform::identity(),
-                        None,
+                        mask,
                     );
                 }
             }
 
-            DrawCommand::DrawGlyph(glyph) => {
+            DrawCommand::DrawGlyph { glyph, clip } => {
+                // Build the clip mask before borrowing the font cache so the
+                // mutable `&mut self` it needs does not overlap the shared
+                // `font_cache` borrow taken just below.
+                self.ensure_clip_mask(&clip, px_w, px_h, base_transform);
                 let Some(ext) = self
                     .font_cache
                     .get(&glyph.font_name)
@@ -258,10 +285,17 @@ impl<'a> PageRasterizer<'a> {
 
                 let skia_color = glyph.color.to_tiny_skia_color();
                 let paint = paint_from_color(skia_color);
-                pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, local, None);
+                let mask = self.active_mask(&clip);
+                pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, local, mask);
             }
 
-            DrawCommand::DrawImage { image, transform } => {
+            DrawCommand::DrawImage {
+                image,
+                transform,
+                clip,
+            } => {
+                self.ensure_clip_mask(&clip, px_w, px_h, base_transform);
+                let mask = self.active_mask(&clip);
                 // Place the image on the pixmap
                 // The image transform maps from unit square [0,1]×[0,1] to user space
                 // In PDF, images are 1×1 units in the current graphics state CTM
@@ -315,7 +349,7 @@ impl<'a> PageRasterizer<'a> {
                                         rect,
                                         &paint,
                                         tiny_skia::Transform::identity(),
-                                        None,
+                                        mask,
                                     );
                                 }
                             }
@@ -326,6 +360,83 @@ impl<'a> PageRasterizer<'a> {
         }
         Ok(())
     }
+
+    /// Ensure [`Self::clip_cache`] holds the clip mask for `clip`, rebuilding it
+    /// only when the region differs from the cached one (by pointer identity).
+    ///
+    /// Takes `&mut self`, so it must be called *before* any shared borrow of
+    /// another field (e.g. the font cache) used in the same draw command.
+    fn ensure_clip_mask(
+        &mut self,
+        clip: &ClipState,
+        width: u32,
+        height: u32,
+        base_transform: &tiny_skia::Transform,
+    ) {
+        if clip.is_unclipped() {
+            return;
+        }
+        let fresh = match &self.clip_cache {
+            Some((cached, _)) => !cached.same_region(clip),
+            None => true,
+        };
+        if fresh {
+            self.clip_cache =
+                build_clip_mask(clip, width, height, base_transform).map(|m| (clip.clone(), m));
+        }
+    }
+
+    /// The clip mask for `clip`, or `None` when unclipped. Must be preceded by
+    /// [`Self::ensure_clip_mask`] with the same `clip` so the cache is current.
+    fn active_mask(&self, clip: &ClipState) -> Option<&tiny_skia::Mask> {
+        if clip.is_unclipped() {
+            return None;
+        }
+        self.clip_cache.as_ref().and_then(|(cached, mask)| {
+            if cached.same_region(clip) {
+                Some(mask)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// Build a clip [`tiny_skia::Mask`] for an accumulated clip region.
+///
+/// The mask matches the target pixmap's pixel dimensions. Each clip outline is
+/// stored in screen space, so it is rasterized through `base_transform` (the
+/// DPI scale) to land in the same pixel space as the painted geometry. A fresh
+/// mask starts fully opaque-black (blocks everything); the first outline is
+/// *filled* (its interior becomes paintable) and each subsequent outline is
+/// *intersected*, producing the region intersection PDF clipping requires.
+///
+/// Returns `None` only when there is no clip outline or the mask allocation
+/// fails (e.g. a zero-sized pixmap, which the caller already rejects).
+fn build_clip_mask(
+    clip: &ClipState,
+    width: u32,
+    height: u32,
+    base_transform: &tiny_skia::Transform,
+) -> Option<tiny_skia::Mask> {
+    let paths = clip.paths();
+    if paths.is_empty() {
+        return None;
+    }
+    let mut mask = tiny_skia::Mask::new(width, height)?;
+    for (index, clip_path) in paths.iter().enumerate() {
+        let fill_rule = if clip_path.even_odd {
+            tiny_skia::FillRule::EvenOdd
+        } else {
+            tiny_skia::FillRule::Winding
+        };
+        if index == 0 {
+            mask.fill_path(&clip_path.path, fill_rule, true, *base_transform);
+        } else {
+            mask.intersect_path(&clip_path.path, fill_rule, true, *base_transform);
+        }
+    }
+    Some(mask)
 }
 
 // ---------------------------------------------------------------------------
@@ -679,5 +790,146 @@ mod tests {
                 eprintln!("Note: minimal PDF parse error (acceptable): {e}");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Clipping (W / W*) end-to-end raster tests
+    // -----------------------------------------------------------------------
+
+    /// Build a single-page PDF with the given square media box and content.
+    fn build_pdf_sized(media: u32, content: &[u8]) -> Vec<u8> {
+        let content_len = content.len();
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"%PDF-1.4\n");
+        let o1 = out.len();
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let o2 = out.len();
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        let o3 = out.len();
+        out.extend_from_slice(
+            format!(
+                "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {media} {media}] /Contents 4 0 R >>\nendobj\n"
+            )
+            .as_bytes(),
+        );
+        let o4 = out.len();
+        out.extend_from_slice(format!("4 0 obj\n<< /Length {content_len} >>\nstream\n").as_bytes());
+        out.extend_from_slice(content);
+        out.extend_from_slice(b"endstream\nendobj\n");
+        let xref = out.len();
+        out.extend_from_slice(b"xref\n0 5\n");
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        out.extend_from_slice(format!("{o1:010} 00000 n \n").as_bytes());
+        out.extend_from_slice(format!("{o2:010} 00000 n \n").as_bytes());
+        out.extend_from_slice(format!("{o3:010} 00000 n \n").as_bytes());
+        out.extend_from_slice(format!("{o4:010} 00000 n \n").as_bytes());
+        out.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n");
+        out.extend_from_slice(format!("{xref}\n").as_bytes());
+        out.extend_from_slice(b"%%EOF\n");
+        out
+    }
+
+    /// Render `content` on a 200×200 pt page at 72 DPI (1 pt = 1 px).
+    fn render_200(content: &[u8]) -> RasterPage {
+        let pdf = build_pdf_sized(200, content);
+        let doc = PdfDocument::from_bytes(&pdf).expect("clip-test PDF should parse");
+        let page = doc.get_page(0).expect("page 0");
+        let mut rasterizer = PageRasterizer::new(&doc);
+        rasterizer.render(&page, 72.0).expect("clip-test render")
+    }
+
+    /// RGBA tuple of one pixel.
+    fn pixel(raster: &RasterPage, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let idx = ((y * raster.width + x) * 4) as usize;
+        (
+            raster.pixels[idx],
+            raster.pixels[idx + 1],
+            raster.pixels[idx + 2],
+            raster.pixels[idx + 3],
+        )
+    }
+
+    fn is_black(p: (u8, u8, u8, u8)) -> bool {
+        p.0 < 64 && p.1 < 64 && p.2 < 64
+    }
+
+    fn is_white(p: (u8, u8, u8, u8)) -> bool {
+        p.0 > 192 && p.1 > 192 && p.2 > 192
+    }
+
+    #[test]
+    fn test_clip_masks_fill_to_clip_rect() {
+        // Clip to PDF rect (50,50,100,100) — which maps to the screen square
+        // x∈[50,150], y∈[50,150] — then fill the WHOLE 200×200 page black.
+        // Only the clip region may be painted; the rest must stay background.
+        let clipped = render_200(b"50 50 100 100 re W n 0 0 0 rg 0 0 200 200 re f\n");
+        assert_eq!((clipped.width, clipped.height), (200, 200));
+
+        // Center of the clip is painted black.
+        assert!(
+            is_black(pixel(&clipped, 100, 100)),
+            "center of clip must be painted, got {:?}",
+            pixel(&clipped, 100, 100)
+        );
+
+        // Every probe outside the clip rect (but well inside the filled region)
+        // must remain unpainted white — i.e. the fill no longer bleeds out.
+        for &(x, y) in &[
+            (20u32, 20u32),
+            (180, 180),
+            (20, 100),
+            (100, 20),
+            (180, 100),
+            (100, 180),
+        ] {
+            assert!(
+                is_white(pixel(&clipped, x, y)),
+                "pixel ({x},{y}) is outside the clip and must stay white, got {:?}",
+                pixel(&clipped, x, y)
+            );
+        }
+    }
+
+    #[test]
+    fn test_no_clip_document_renders_identically_to_before() {
+        // The very same fill WITHOUT a clip paints the whole page — including
+        // the exact points the clipped version leaves white. This guards that
+        // the unclipped path (no mask) is unchanged from prior behavior.
+        let full = render_200(b"0 0 0 rg 0 0 200 200 re f\n");
+        for &(x, y) in &[(20u32, 20u32), (180, 180), (20, 100), (100, 100)] {
+            assert!(
+                is_black(pixel(&full, x, y)),
+                "no-clip fill must paint ({x},{y}) black, got {:?}",
+                pixel(&full, x, y)
+            );
+        }
+    }
+
+    #[test]
+    fn test_clip_inside_matches_unclipped_inside() {
+        // Inside the clip region, clipped and unclipped renders agree exactly:
+        // clipping only removes the outside, it does not alter inside coverage.
+        let clipped = render_200(b"50 50 100 100 re W n 0 0 0 rg 0 0 200 200 re f\n");
+        let full = render_200(b"0 0 0 rg 0 0 200 200 re f\n");
+        assert_eq!(
+            pixel(&clipped, 100, 100),
+            pixel(&full, 100, 100),
+            "inside-clip pixel must be identical to the unclipped render"
+        );
+    }
+
+    #[test]
+    fn test_clip_restored_after_q_q_does_not_mask_later_fill() {
+        // `q re W n <fill> Q <fill>`: the second fill is outside the q/Q block,
+        // so the clip is restored and it paints the full page again.
+        let content =
+            b"q 50 50 100 100 re W n 0 0 0 rg 0 0 200 200 re f Q 0 0 0 rg 0 0 200 200 re f\n";
+        let raster = render_200(content);
+        // A corner that the in-q clip excluded is painted by the post-Q fill.
+        assert!(
+            is_black(pixel(&raster, 20, 20)),
+            "after Q the clip is gone, so the corner is painted, got {:?}",
+            pixel(&raster, 20, 20)
+        );
     }
 }

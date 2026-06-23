@@ -86,10 +86,33 @@ fn decode_jpeg(data: &[u8], _expected_w: u32, _expected_h: u32) -> Result<Vec<u8
 
 fn decode_png(data: &[u8]) -> Result<Vec<u8>> {
     let cursor = std::io::Cursor::new(data);
-    let decoder = png::Decoder::new(cursor);
+    let mut decoder = png::Decoder::new(cursor);
+    // Expand palette-indexed images to RGB/RGBA and strip 16-bit channels to
+    // 8-bit so the match arms below always deal with 8-bit-per-channel data.
+    // For an Indexed image without a tRNS chunk this yields ColorType::Rgb;
+    // with a tRNS chunk it yields ColorType::Rgba.
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+
     let mut reader = decoder
         .read_info()
         .map_err(|e: png::DecodingError| PdfRenderError::Image(e.to_string()))?;
+
+    // Capture palette and transparency before next_frame.  These are only
+    // consulted by the Indexed fallback arm below (reached only when the png
+    // crate did not fire the EXPAND transformation for some reason).
+    let palette_data: Vec<u8> = reader
+        .info()
+        .palette
+        .as_deref()
+        .map(|s| s.to_vec())
+        .unwrap_or_default();
+    let trns_data: Vec<u8> = reader
+        .info()
+        .trns
+        .as_deref()
+        .map(|s| s.to_vec())
+        .unwrap_or_default();
+
     let buf_size = reader.output_buffer_size().ok_or_else(|| {
         PdfRenderError::Image("PNG: could not determine output buffer size".to_string())
     })?;
@@ -113,12 +136,36 @@ fn decode_png(data: &[u8]) -> Result<Vec<u8>> {
             .flat_map(|c| [c[0], c[0], c[0], c[1]])
             .collect(),
         png::ColorType::Indexed => {
-            // Indexed color - return as is (simplified)
-            frame.iter().flat_map(|&g| [g, g, g, 255u8]).collect()
+            // Fallback: EXPAND did not fire.  Each byte in `frame` is a palette
+            // index; expand to RGBA by looking up the PLTE (and tRNS) data saved
+            // above before next_frame was called.
+            expand_indexed_png(frame, w, h, &palette_data, &trns_data)
         }
     };
     let _ = (w, h);
     Ok(rgba)
+}
+
+/// Expand raw palette-index bytes into RGBA by consulting PLTE / tRNS data.
+///
+/// `indices`: one byte per pixel – the palette index.
+/// `palette`: PLTE chunk bytes – `[R, G, B]` triples, one per index entry.
+/// `trns`:    tRNS chunk bytes – one alpha byte per index entry (may be shorter
+///            than the palette, in which case remaining entries are fully opaque).
+fn expand_indexed_png(indices: &[u8], w: u32, h: u32, palette: &[u8], trns: &[u8]) -> Vec<u8> {
+    let total_pixels = (w as usize).saturating_mul(h as usize);
+    let mut rgba = Vec::with_capacity(total_pixels * 4);
+
+    for &idx in indices.iter().take(total_pixels) {
+        let i = idx as usize;
+        let base = i * 3;
+        let r = palette.get(base).copied().unwrap_or(0);
+        let g = palette.get(base + 1).copied().unwrap_or(0);
+        let b = palette.get(base + 2).copied().unwrap_or(0);
+        let a = trns.get(i).copied().unwrap_or(255);
+        rgba.extend_from_slice(&[r, g, b, a]);
+    }
+    rgba
 }
 
 fn decode_raw(data: &[u8], width: u32, height: u32, bits: u32, color_space: &str) -> Vec<u8> {
@@ -418,5 +465,133 @@ mod tests {
     fn test_image_dict_no_filter() {
         let dict = make_image_dict(1, 1, 8, "DeviceRGB", None);
         assert_eq!(dict.get_name("Filter"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Indexed PNG palette expansion (the bug fix)
+    // -----------------------------------------------------------------------
+
+    /// Build a 2×2 indexed-color PNG in memory with a known palette and verify
+    /// that `decode_png` returns the correct RGB colours, not gray noise.
+    ///
+    /// Palette:  index 0 → red  (255,   0,   0)
+    ///           index 1 → blue (  0,   0, 255)
+    ///
+    /// Pixel layout (row-major):
+    ///   (0,0) = 0 → red,   (0,1) = 1 → blue
+    ///   (1,0) = 1 → blue,  (1,1) = 0 → red
+    #[test]
+    fn test_decode_png_indexed_expands_palette() {
+        // ------------------------------------------------------------------
+        // Encode a tiny indexed PNG with the `png` crate encoder.
+        // ------------------------------------------------------------------
+        let mut png_bytes: Vec<u8> = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 2, 2);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            // PLTE: entry 0 = red, entry 1 = blue (3 bytes each)
+            encoder.set_palette(vec![255u8, 0, 0, 0, 0, 255]);
+            let mut writer = encoder
+                .write_header()
+                .expect("png::Encoder::write_header should succeed");
+            writer
+                .write_image_data(&[0u8, 1, 1, 0])
+                .expect("png::Writer::write_image_data should succeed");
+        }
+
+        // Sanity: the bytes should begin with the PNG signature.
+        assert!(
+            png_bytes.starts_with(b"\x89PNG"),
+            "encoded bytes must start with PNG signature"
+        );
+
+        // ------------------------------------------------------------------
+        // Decode via DecodedImage::decode (the public API that also calls
+        // decode_png when it detects PNG magic bytes in the data).
+        // ------------------------------------------------------------------
+        let dict = make_image_dict(2, 2, 8, "Indexed", None);
+        let img = DecodedImage::decode(&dict, &png_bytes)
+            .expect("DecodedImage::decode should succeed for a valid indexed PNG");
+
+        assert_eq!(img.width, 2, "decoded width must be 2");
+        assert_eq!(img.height, 2, "decoded height must be 2");
+        assert_eq!(
+            img.pixels.len(),
+            16,
+            "4 pixels × 4 RGBA bytes = 16 bytes total"
+        );
+
+        // Row 0 ── pixel (0,0): index 0 → red
+        assert_eq!(
+            &img.pixels[0..4],
+            &[255u8, 0, 0, 255],
+            "pixel(0,0) must be red RGBA, not gray"
+        );
+        // Row 0 ── pixel (0,1): index 1 → blue
+        assert_eq!(
+            &img.pixels[4..8],
+            &[0u8, 0, 255, 255],
+            "pixel(0,1) must be blue RGBA, not gray"
+        );
+        // Row 1 ── pixel (1,0): index 1 → blue
+        assert_eq!(
+            &img.pixels[8..12],
+            &[0u8, 0, 255, 255],
+            "pixel(1,0) must be blue RGBA, not gray"
+        );
+        // Row 1 ── pixel (1,1): index 0 → red
+        assert_eq!(
+            &img.pixels[12..16],
+            &[255u8, 0, 0, 255],
+            "pixel(1,1) must be red RGBA, not gray"
+        );
+    }
+
+    /// Verify that the manual fallback `expand_indexed_png` yields correct RGBA
+    /// even when called directly (i.e. without relying on the EXPAND transform).
+    #[test]
+    fn test_expand_indexed_png_manual_fallback() {
+        // Palette: index 0 = green (0, 255, 0), index 1 = white (255, 255, 255)
+        let palette = vec![0u8, 255, 0, 255, 255, 255];
+        // tRNS: index 0 is semi-transparent (128), index 1 is opaque (255)
+        let trns = vec![128u8, 255];
+        // 1×2 image: pixels [0, 1]
+        let indices = vec![0u8, 1];
+
+        let rgba = expand_indexed_png(&indices, 2, 1, &palette, &trns);
+
+        assert_eq!(rgba.len(), 8, "2 pixels × 4 bytes = 8");
+        // Pixel 0: index 0 → green, alpha 128
+        assert_eq!(
+            &rgba[0..4],
+            &[0u8, 255, 0, 128],
+            "pixel 0 must be semi-transparent green"
+        );
+        // Pixel 1: index 1 → white, alpha 255
+        assert_eq!(
+            &rgba[4..8],
+            &[255u8, 255, 255, 255],
+            "pixel 1 must be opaque white"
+        );
+    }
+
+    /// Out-of-range index entries must not panic – they should silently return
+    /// black (palette miss) with full opacity (tRNS miss).
+    #[test]
+    fn test_expand_indexed_png_oob_index_returns_black() {
+        // Palette has only 1 entry (index 0 = red).  Index 1 is out of range.
+        let palette = vec![255u8, 0, 0];
+        let trns: Vec<u8> = vec![];
+        let indices = vec![1u8]; // index 1 – beyond the palette
+
+        let rgba = expand_indexed_png(&indices, 1, 1, &palette, &trns);
+
+        assert_eq!(rgba.len(), 4);
+        assert_eq!(
+            &rgba[0..4],
+            &[0u8, 0, 0, 255],
+            "out-of-range index must produce opaque black, not a panic"
+        );
     }
 }

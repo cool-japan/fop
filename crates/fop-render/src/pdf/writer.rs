@@ -228,6 +228,22 @@ impl PdfRenderer {
         self.render_page(area_tree, page_id, image_map, opacity_map, font_cache)
     }
 
+    /// Public wrapper for build_font_cache (for parallel rendering)
+    ///
+    /// Scans `area_tree` for all distinct `font-family` trait values, embeds
+    /// the corresponding fonts into `doc` using this renderer's [`FontConfig`],
+    /// and returns a map from family name (lowercase) to embedded font index.
+    ///
+    /// Font embedding mutates `doc` and therefore cannot be performed
+    /// concurrently; call this once sequentially before the parallel page loop.
+    pub fn build_font_cache_public(
+        &self,
+        area_tree: &AreaTree,
+        doc: &mut PdfDocument,
+    ) -> Result<HashMap<String, usize>> {
+        self.build_font_cache(area_tree, doc)
+    }
+
     /// Collect all opacity values from the area tree and create ExtGStates
     fn collect_opacity_states(
         &self,

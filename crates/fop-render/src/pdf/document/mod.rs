@@ -56,7 +56,22 @@ impl PdfDocument {
     /// # Errors
     /// Returns an error if PDF/A compliance is requested together with encryption,
     /// since PDF/A-1b (ISO 19005-1) forbids encryption.
+    ///
+    /// Returns an error if PDF/UA-1 compliance is requested, because ISO 14289-1
+    /// requires a complete tagged-PDF structure tree (StructTreeRoot with real `K`
+    /// kids, `BDC`/`EMC` marked-content operators in every page stream, etc.) that
+    /// this implementation does not yet produce.  Emitting `/Marked true` and an
+    /// empty StructTreeRoot would be a false conformance claim rejected by veraPDF
+    /// and PAC.  Full tagged-PDF support is planned for a future release.
     pub fn set_compliance(&mut self, compliance: PdfCompliance) -> Result<()> {
+        if compliance.requires_pdfua() {
+            return Err(FopError::Generic(
+                "PDF/UA-1 tagged-PDF output is not yet implemented: \
+                 ISO 14289-1 requires a complete structure tree with marked-content \
+                 operators; a future release will add this feature"
+                    .to_string(),
+            ));
+        }
         if compliance.requires_pdfa() && self.encryption.is_some() {
             return Err(FopError::Generic(
                 "PDF/A-1b compliance is incompatible with encryption (ISO 19005-1 §6.1.1)"
@@ -167,7 +182,22 @@ impl PdfDocument {
     }
 
     /// Generate PDF bytes
+    ///
+    /// # Errors
+    /// Returns an error if the active compliance mode includes PDF/UA-1, because
+    /// the required tagged-PDF structure tree is not yet implemented.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        // Belt-and-suspenders: `set_compliance` already rejects pdfua, but the
+        // `compliance` field is `pub`, so a caller might set it directly.
+        if self.compliance.requires_pdfua() {
+            return Err(FopError::Generic(
+                "PDF/UA-1 tagged-PDF output is not yet implemented: \
+                 ISO 14289-1 requires a complete structure tree with marked-content \
+                 operators; a future release will add this feature"
+                    .to_string(),
+            ));
+        }
+
         let mut bytes = Vec::new();
         let mut xref_offsets = Vec::new();
 
@@ -193,7 +223,6 @@ impl PdfDocument {
         //   xmp_obj_id       : XMP metadata stream (if any compliance mode)
         //   output_intent_id : OutputIntent dict   (if PDF/A)
         //   icc_profile_id   : ICC profile stream  (if PDF/A)
-        //   struct_tree_id   : StructTreeRoot       (if PDF/UA)
         let font_obj_id = 3;
         let first_outline_obj_id = 4;
         let num_embedded_fonts = self.font_manager.font_count();
@@ -204,7 +233,7 @@ impl PdfDocument {
         let compliance_base_id = encrypt_obj_id + encrypt_obj_count;
         let needs_compliance = self.compliance != PdfCompliance::Standard;
         // needs_xmp is true whenever we have a user-supplied XMP packet OR a non-standard
-        // compliance mode (PDF/A-1b or PDF/UA-1 both require an /Metadata stream).
+        // compliance mode (PDF/A-1b requires an /Metadata stream).
         let needs_xmp = needs_compliance || self.xmp_metadata.is_some();
         let xmp_obj_count = if needs_xmp { 1 } else { 0 };
         let xmp_obj_id = compliance_base_id; // only valid when needs_xmp
@@ -215,13 +244,7 @@ impl PdfDocument {
         };
         let output_intent_obj_id = compliance_base_id + xmp_obj_count; // only valid when pdfa
         let icc_profile_obj_id = output_intent_obj_id + 1; // only valid when pdfa
-        let struct_tree_obj_count = if self.compliance.requires_pdfua() {
-            1
-        } else {
-            0
-        };
-        let struct_tree_obj_id = compliance_base_id + xmp_obj_count + oi_obj_count; // only valid when pdfua
-        let total_compliance_obj_count = xmp_obj_count + oi_obj_count + struct_tree_obj_count;
+        let total_compliance_obj_count = xmp_obj_count + oi_obj_count;
 
         let first_embedded_font_obj_id = compliance_base_id + total_compliance_obj_count;
 
@@ -247,16 +270,8 @@ impl PdfDocument {
                 format!("/OutputIntents [{} 0 R]\n", output_intent_obj_id).as_bytes(),
             );
         }
-        if self.compliance.requires_pdfua() {
-            bytes.extend_from_slice(b"/MarkInfo <<\n/Marked true\n>>\n");
-            let lang = self.info.lang.as_deref().unwrap_or("en-US");
-            bytes.extend_from_slice(format!("/Lang ({})\n", lang).as_bytes());
-            bytes.extend_from_slice(
-                format!("/StructTreeRoot {} 0 R\n", struct_tree_obj_id).as_bytes(),
-            );
-            bytes.extend_from_slice(b"/ViewerPreferences <<\n/DisplayDocTitle true\n>>\n");
-        } else if let Some(ref lang) = self.info.lang {
-            // Add /Lang to catalog even without PDF/UA when xml:lang is specified
+        if let Some(ref lang) = self.info.lang {
+            // Add /Lang to catalog when xml:lang is specified
             bytes.extend_from_slice(format!("/Lang ({})\n", lang).as_bytes());
         }
 
@@ -370,15 +385,6 @@ impl PdfDocument {
             bytes.extend_from_slice(b">>\nstream\n");
             bytes.extend_from_slice(icc_data);
             bytes.extend_from_slice(b"\nendstream\nendobj\n");
-        }
-
-        if self.compliance.requires_pdfua() {
-            // StructTreeRoot — minimal structure tree required by PDF/UA-1
-            xref_offsets.push(bytes.len());
-            bytes.extend_from_slice(format!("{} 0 obj\n", struct_tree_obj_id).as_bytes());
-            bytes.extend_from_slice(b"<<\n");
-            bytes.extend_from_slice(b"/Type /StructTreeRoot\n");
-            bytes.extend_from_slice(b">>\nendobj\n");
         }
 
         // Generate embedded font objects (6 objects per font: descriptor, stream, CIDFont, Type0, ToUnicode, CIDToGIDMap)
@@ -1526,5 +1532,62 @@ mod tests_document_comprehensive {
         );
         // The unescaped form must NOT appear
         assert!(!content.contains("/Title ((parenthesised))"));
+    }
+
+    // ── PDF/UA-1 honest error tests ───────────────────────────────────────────
+
+    /// `set_compliance(PdfUA1)` must return an error rather than silently
+    /// producing a PDF that falsely claims UA-1 conformance with an empty
+    /// StructTreeRoot (which veraPDF/PAC would reject).
+    #[test]
+    fn test_set_compliance_pdfua1_returns_not_implemented_error() {
+        use crate::pdf::compliance::PdfCompliance;
+        let mut doc = PdfDocument::new();
+        let result = doc.set_compliance(PdfCompliance::PdfUA1);
+        assert!(
+            result.is_err(),
+            "PDF/UA-1 set_compliance must return Err (tagged-PDF not implemented)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("PDF/UA-1"),
+            "Error message must mention PDF/UA-1; got: {msg}"
+        );
+    }
+
+    /// `set_compliance(PdfA1bUA1)` must also error because the UA-1 part
+    /// is not implemented regardless of the PDF/A-1b part.
+    #[test]
+    fn test_set_compliance_pdfa1bua1_returns_not_implemented_error() {
+        use crate::pdf::compliance::PdfCompliance;
+        let mut doc = PdfDocument::new();
+        let result = doc.set_compliance(PdfCompliance::PdfA1bUA1);
+        assert!(
+            result.is_err(),
+            "PDF/A-1b+UA-1 set_compliance must return Err (UA-1 tagged-PDF not implemented)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("PDF/UA-1"),
+            "Error message must mention PDF/UA-1; got: {msg}"
+        );
+    }
+
+    /// Even if a caller bypasses `set_compliance` by writing to the `pub`
+    /// `compliance` field directly, `to_bytes()` must still return an error
+    /// rather than emit false `/Marked true` + empty StructTreeRoot markers.
+    #[test]
+    fn test_to_bytes_pdfua1_via_direct_field_returns_error() {
+        use crate::pdf::compliance::PdfCompliance;
+        let mut doc = PdfDocument::new();
+        // Bypass set_compliance by writing the field directly.
+        doc.compliance = PdfCompliance::PdfUA1;
+        let result = doc.to_bytes();
+        assert!(
+            result.is_err(),
+            "to_bytes() with PdfUA1 compliance must return Err, not a non-conformant PDF"
+        );
+        // Also verify the false markers are absent — to_bytes errored before writing them.
+        // (The error path means no bytes are returned, so there is nothing to scan.)
     }
 }

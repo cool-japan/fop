@@ -215,6 +215,33 @@ impl TableLayout {
     pub fn border_collapse(&self) -> BorderCollapse {
         self.border_collapse
     }
+
+    /// Get the available width budget for the whole table (all columns plus any
+    /// inter-cell spacing).  This is the width passed to [`TableLayout::new`].
+    pub fn available_width(&self) -> Length {
+        self.available_width
+    }
+
+    /// Get the configured border spacing (used only in the separate-border model).
+    pub fn border_spacing(&self) -> Length {
+        self.border_spacing
+    }
+
+    /// Width left for the column boxes themselves once inter-cell spacing has been
+    /// subtracted.  In the collapsed-border model there is no spacing, so this is
+    /// the full [`TableLayout::available_width`]; in the separate model it removes
+    /// `border_spacing × (n_cols + 1)`.
+    ///
+    /// This mirrors the budget that [`TableLayout::compute_auto_widths`] and
+    /// [`TableLayout::compute_fixed_widths`] distribute across the columns, so the
+    /// engine can grow auto columns to exactly fill the table.
+    pub fn content_width_for_columns(&self, n_cols: usize) -> Length {
+        let total_spacing = match self.border_collapse {
+            BorderCollapse::Separate => self.border_spacing * (n_cols + 1) as i32,
+            BorderCollapse::Collapse => Length::ZERO,
+        };
+        self.available_width - total_spacing
+    }
 }
 
 /// Collapsed borders for all four edges of a cell

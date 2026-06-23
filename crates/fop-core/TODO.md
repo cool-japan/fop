@@ -13,12 +13,12 @@
 - [x] Add `background` shorthand expansion
 - [x] Implement property validation (range checks, allowed enum values)
 - [x] Add initial value defaults for all 294 properties
-- [x] Support `inherit` keyword as property value
+- [x] Support `inherit` keyword as property value (audit 2026-06-23: verified — inheritance now covers the full ~60 XSL-FO 1.1 inheritable properties; was previously limited to 14)
 - [x] Support relative property values (e.g., `font-size="larger"`)
 - [x] Support `from-parent()` / `from-nearest-specified-value()` functions (treated as `inherit`)
 
 ## FO Tree
-- [x] Add `fo:marker` and `fo:retrieve-marker` support
+- [x] Add `fo:marker` and `fo:retrieve-marker` support (audit 2026-06-23: verified — running headers/footers now resolve per page with all four `retrieve-position` values; was previously returning the same marker on every page)
 - [x] Add `fo:footnote` and `fo:footnote-body` support
 - [x] Add `fo:float` support
 - [x] Add `fo:page-number` inline element

@@ -6,38 +6,61 @@ use crate::area::{
 };
 use crate::layout::TextAlign;
 use fop_core::{PropertyId, PropertyList};
-use fop_types::Length;
+use fop_types::{FontRegistry, Length};
 
 use super::misc::{extract_border_radius, extract_opacity, extract_overflow, OverflowBehavior};
 use super::spacing::{extract_letter_spacing, extract_line_height, extract_word_spacing};
 
-/// Extract font-size from a property value, resolving relative sizes
+/// Resolve the computed font-size of the parent element.
 ///
-/// If the value is a relative font size (larger, smaller, or size keywords),
-/// it will be resolved using the parent font size from the property list.
-/// Returns None if the value cannot be converted to a length.
-pub(super) fn extract_font_size(
-    properties: &PropertyList,
-    value: &fop_core::PropertyValue,
-) -> Option<Length> {
-    // First check if it's a direct length
-    if let Some(len) = value.as_length() {
-        return Some(len);
-    }
-
-    // Check if it's a relative font size
-    if value.as_relative_font_size().is_some() {
-        // Get parent font size for resolution
-        let parent_font_size = if let Some(parent) = properties.parent() {
+/// Walks up the property list parent chain, recursively resolving any em
+/// (`Percentage`) or relative-keyword values so that nested ems compound
+/// correctly (e.g. `1.5em` inside a `1.5em`-of-10pt block yields 22.5 pt).
+/// Falls back to 12 pt when no resolvable parent exists.
+fn resolve_parent_font_size(properties: &PropertyList) -> Length {
+    properties
+        .parent()
+        .and_then(|parent| {
             parent
                 .get(PropertyId::FontSize)
                 .ok()
                 .and_then(|v| extract_font_size(parent, &v))
-                .unwrap_or(Length::from_pt(12.0)) // Default to 12pt if no parent
-        } else {
-            Length::from_pt(12.0) // Default to 12pt if no parent
-        };
+        })
+        .unwrap_or(Length::from_pt(12.0))
+}
 
+/// Extract font-size from a property value, resolving relative sizes.
+///
+/// Resolution order:
+/// 1. `PropertyValue::Length`  — returned directly.
+/// 2. `PropertyValue::Percentage` — em values stored by the parser
+///    (1 em → `Percentage::new(1.0)`).  Resolved as `pct.of(parent_font_size)`,
+///    where `parent_font_size` is itself resolved recursively so nested ems
+///    compound: a child element with `font-size="1.5em"` whose parent already
+///    resolved to 15 pt gets `1.5 × 15 = 22.5 pt`.
+/// 3. `PropertyValue::RelativeFontSize` — keyword sizes (`larger`, `smaller`,
+///    `small`, `medium`, `large`, etc.) resolved via `resolve_font_size`.
+/// 4. Any other variant returns `None`.
+pub(super) fn extract_font_size(
+    properties: &PropertyList,
+    value: &fop_core::PropertyValue,
+) -> Option<Length> {
+    // 1. Direct absolute length — no parent lookup needed.
+    if let Some(len) = value.as_length() {
+        return Some(len);
+    }
+
+    // 2. em values: the parser stores `Xem` as `Percentage::new(X)` so that
+    //    1 em = 100 % of parent.  Multiplying by the parent's *computed* size
+    //    (obtained recursively) makes nested ems compound correctly.
+    if let Some(pct) = value.as_percentage() {
+        let parent_font_size = resolve_parent_font_size(properties);
+        return Some(pct.of(parent_font_size));
+    }
+
+    // 3. Relative keyword sizes (larger, smaller, xx-small … xx-large).
+    if value.as_relative_font_size().is_some() {
+        let parent_font_size = resolve_parent_font_size(properties);
         return value.resolve_font_size(parent_font_size);
     }
 
@@ -472,4 +495,251 @@ fn is_cjk(ch: char) -> bool {
         | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
         | '\u{FF00}'..='\u{FFEF}' // Halfwidth and Fullwidth Forms
     )
+}
+
+/// Resolve a set of resolved text traits to one of the 14 Standard PDF font
+/// names whose AFM advance-width tables live in [`FontRegistry`].
+///
+/// The mapping uses three inputs:
+/// * `font-family` — a case-insensitive substring match selects the family
+///   (`times`/generic `serif` → Times, `courier`/`mono` → Courier, otherwise
+///   Helvetica, which is also the fall-back for unknown families).
+/// * `font-weight` — a weight of 600 or greater selects the bold face.
+/// * `font-style` — `italic`/`oblique` selects the slanted face (Times uses the
+///   "Italic"/"BoldItalic" face names, Helvetica and Courier use the
+///   "Oblique"/"BoldOblique" names).
+///
+/// The returned name is guaranteed to exist in [`FontRegistry::new`], so a
+/// subsequent [`FontRegistry::get_or_default`] yields the correct per-variant
+/// advance widths rather than silently collapsing every face onto Helvetica.
+pub(crate) fn resolve_standard_font_name(traits: &TraitSet) -> &'static str {
+    let family = traits
+        .font_family
+        .as_deref()
+        .unwrap_or("Helvetica")
+        .to_ascii_lowercase();
+
+    let bold = traits.font_weight.map(|w| w >= 600).unwrap_or(false);
+    let italic = matches!(
+        traits.font_style,
+        Some(FontStyle::Italic) | Some(FontStyle::Oblique)
+    );
+
+    // Generic `serif` must not match inside `sans-serif`.
+    let is_serif =
+        family.contains("times") || (family.contains("serif") && !family.contains("sans"));
+    let is_mono = family.contains("courier") || family.contains("mono");
+
+    if is_serif {
+        match (bold, italic) {
+            (false, false) => "Times-Roman",
+            (true, false) => "Times-Bold",
+            (false, true) => "Times-Italic",
+            (true, true) => "Times-BoldItalic",
+        }
+    } else if is_mono {
+        match (bold, italic) {
+            (false, false) => "Courier",
+            (true, false) => "Courier-Bold",
+            (false, true) => "Courier-Oblique",
+            (true, true) => "Courier-BoldOblique",
+        }
+    } else {
+        match (bold, italic) {
+            (false, false) => "Helvetica",
+            (true, false) => "Helvetica-Bold",
+            (false, true) => "Helvetica-Oblique",
+            (true, true) => "Helvetica-BoldOblique",
+        }
+    }
+}
+
+/// Measure the advance width of `text` using the **real** per-variant font
+/// metrics held by `registry`.
+///
+/// Unlike [`measure_text_width`] (a coarse average-character-width estimator
+/// kept for backwards compatibility), this resolves the concrete Standard-14
+/// face from `traits` via [`resolve_standard_font_name`] and sums the exact AFM
+/// advance widths for every character at the resolved `font-size` (defaulting to
+/// 12 pt when unset).  This is the measurement used by the Knuth-Plass line
+/// breaker and by per-line alignment in the block layout engine, so that line
+/// breaking and area geometry agree on glyph widths.
+pub(crate) fn measure_text_metrics(
+    text: &str,
+    traits: &TraitSet,
+    registry: &FontRegistry,
+) -> Length {
+    if text.is_empty() {
+        return Length::ZERO;
+    }
+    let font_size = traits.font_size.unwrap_or(Length::from_pt(12.0));
+    let name = resolve_standard_font_name(traits);
+    registry.get_or_default(name).measure_text(text, font_size)
+}
+
+/// Unit tests for em-unit font-size resolution in `extract_font_size`.
+#[cfg(test)]
+mod em_tests {
+    use super::{extract_font_size, resolve_parent_font_size};
+    use fop_core::{PropertyId, PropertyList, PropertyValue};
+    use fop_types::{Length, Percentage};
+
+    fn pt(v: f64) -> Length {
+        Length::from_pt(v)
+    }
+
+    fn assert_pt_approx(got: Length, expected_pt: f64) {
+        assert!(
+            (got.to_pt() - expected_pt).abs() < 0.001,
+            "expected {}pt, got {}pt",
+            expected_pt,
+            got.to_pt()
+        );
+    }
+
+    // ── basic em resolution ──────────────────────────────────────────────────
+
+    /// `font-size="1.5em"` on a child whose parent has `font-size="10pt"` → 15 pt.
+    #[test]
+    fn test_em_1_5_under_10pt_parent_yields_15pt() {
+        let mut parent_props = PropertyList::new();
+        parent_props.set(PropertyId::FontSize, PropertyValue::Length(pt(10.0)));
+
+        let mut child_props = PropertyList::with_parent(&parent_props);
+        // 1.5em stored by the parser as Percentage::new(1.5)
+        child_props.set(
+            PropertyId::FontSize,
+            PropertyValue::Percentage(Percentage::new(1.5)),
+        );
+
+        let value = child_props
+            .get(PropertyId::FontSize)
+            .expect("test: get FontSize");
+        let size = extract_font_size(&child_props, &value).expect("test: extract_font_size");
+        assert_pt_approx(size, 15.0);
+    }
+
+    /// `font-size="0.8em"` on a child whose parent has `font-size="10pt"` → 8 pt.
+    #[test]
+    fn test_em_0_8_under_10pt_parent_yields_8pt() {
+        let mut parent_props = PropertyList::new();
+        parent_props.set(PropertyId::FontSize, PropertyValue::Length(pt(10.0)));
+
+        let mut child_props = PropertyList::with_parent(&parent_props);
+        child_props.set(
+            PropertyId::FontSize,
+            PropertyValue::Percentage(Percentage::new(0.8)),
+        );
+
+        let value = child_props
+            .get(PropertyId::FontSize)
+            .expect("test: get FontSize");
+        let size = extract_font_size(&child_props, &value).expect("test: extract_font_size");
+        assert_pt_approx(size, 8.0);
+    }
+
+    /// Without an explicit parent the fallback is 12 pt, so `1.5em` → 18 pt.
+    #[test]
+    fn test_em_without_parent_uses_12pt_default() {
+        let mut props = PropertyList::new();
+        props.set(
+            PropertyId::FontSize,
+            PropertyValue::Percentage(Percentage::new(1.5)),
+        );
+
+        let value = props.get(PropertyId::FontSize).expect("test: get FontSize");
+        let size = extract_font_size(&props, &value).expect("test: extract_font_size");
+        // 1.5 × 12 pt (default) = 18 pt
+        assert_pt_approx(size, 18.0);
+    }
+
+    // ── nested em compounding ────────────────────────────────────────────────
+
+    /// Nested em test:
+    /// - grandparent: `font-size="10pt"`
+    /// - parent:      `font-size="1.5em"` → 15 pt
+    /// - child:       `font-size="1.5em"` → 22.5 pt (1.5 × 15)
+    ///
+    /// The bug report requires: "child of a 1.5em-of-10pt block sees 15 pt as
+    /// its parent".  This is verified explicitly in the parent step.
+    #[test]
+    fn test_nested_em_compounds() {
+        let mut grandparent_props = PropertyList::new();
+        grandparent_props.set(PropertyId::FontSize, PropertyValue::Length(pt(10.0)));
+
+        let mut parent_props = PropertyList::with_parent(&grandparent_props);
+        parent_props.set(
+            PropertyId::FontSize,
+            PropertyValue::Percentage(Percentage::new(1.5)),
+        );
+
+        // Verify the parent step: 1.5em × 10pt = 15pt
+        let parent_val = parent_props
+            .get(PropertyId::FontSize)
+            .expect("test: get parent FontSize");
+        let parent_size =
+            extract_font_size(&parent_props, &parent_val).expect("test: parent extract");
+        assert_pt_approx(parent_size, 15.0);
+
+        // Child step: 1.5em × 15pt = 22.5pt (ems compound)
+        let mut child_props = PropertyList::with_parent(&parent_props);
+        child_props.set(
+            PropertyId::FontSize,
+            PropertyValue::Percentage(Percentage::new(1.5)),
+        );
+
+        let child_val = child_props
+            .get(PropertyId::FontSize)
+            .expect("test: get child FontSize");
+        let child_size = extract_font_size(&child_props, &child_val).expect("test: child extract");
+        assert_pt_approx(child_size, 22.5);
+    }
+
+    /// A 0.8em child under a 1.5em-of-10pt parent: 0.8 × 15 = 12 pt.
+    #[test]
+    fn test_em_child_of_em_parent_compounds() {
+        let mut grandparent_props = PropertyList::new();
+        grandparent_props.set(PropertyId::FontSize, PropertyValue::Length(pt(10.0)));
+
+        let mut parent_props = PropertyList::with_parent(&grandparent_props);
+        parent_props.set(
+            PropertyId::FontSize,
+            PropertyValue::Percentage(Percentage::new(1.5)),
+        );
+
+        let mut child_props = PropertyList::with_parent(&parent_props);
+        child_props.set(
+            PropertyId::FontSize,
+            PropertyValue::Percentage(Percentage::new(0.8)),
+        );
+
+        let child_val = child_props
+            .get(PropertyId::FontSize)
+            .expect("test: get FontSize");
+        let child_size =
+            extract_font_size(&child_props, &child_val).expect("test: extract_font_size");
+        // 0.8 × (1.5 × 10) = 0.8 × 15 = 12 pt
+        assert_pt_approx(child_size, 12.0);
+    }
+
+    // ── resolve_parent_font_size ─────────────────────────────────────────────
+
+    /// With no parent, resolve_parent_font_size returns the 12 pt default.
+    #[test]
+    fn test_resolve_parent_font_size_no_parent_returns_default() {
+        let props = PropertyList::new();
+        let parent_size = resolve_parent_font_size(&props);
+        assert_pt_approx(parent_size, 12.0);
+    }
+
+    /// With an absolute-length parent, the parent's resolved value is returned.
+    #[test]
+    fn test_resolve_parent_font_size_absolute_parent() {
+        let mut parent_props = PropertyList::new();
+        parent_props.set(PropertyId::FontSize, PropertyValue::Length(pt(14.0)));
+
+        let child_props = PropertyList::with_parent(&parent_props);
+        let parent_size = resolve_parent_font_size(&child_props);
+        assert_pt_approx(parent_size, 14.0);
+    }
 }

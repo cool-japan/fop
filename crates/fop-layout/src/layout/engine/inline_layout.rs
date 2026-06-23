@@ -27,6 +27,7 @@ impl LayoutEngine {
         line_height: Length,
         traits: &TraitSet,
         first_line_indent: Length,
+        y_offset: Length,
     ) -> Result<()> {
         let node = fo_tree
             .get(node_id)
@@ -35,10 +36,10 @@ impl LayoutEngine {
         match &node.data {
             FoNodeData::Text(text) => {
                 // Create text area with traits from parent (link or inline)
-                // Apply text-indent to first line
+                // Apply text-indent to first line; stack at the caller's y_offset.
                 let x_offset = first_line_indent;
                 let line_width = available_width - first_line_indent;
-                let text_rect = Rect::new(x_offset, Length::ZERO, line_width, line_height);
+                let text_rect = Rect::new(x_offset, y_offset, line_width, line_height);
                 let text_area = Area::text(text_rect, text.clone()).with_traits(traits.clone());
                 let text_id = area_tree.add_area(text_area);
                 area_tree
@@ -70,6 +71,7 @@ impl LayoutEngine {
                         line_height,
                         &merged_traits,
                         first_line_indent,
+                        y_offset,
                     )?;
                 }
             }
@@ -91,6 +93,7 @@ impl LayoutEngine {
         available_width: Length,
         line_height: Length,
         parent_traits: &TraitSet,
+        y_offset: Length,
     ) -> Result<()> {
         use fop_core::PropertyId;
 
@@ -134,8 +137,8 @@ impl LayoutEngine {
             }
         };
 
-        // Create leader area
-        let leader_rect = Rect::new(Length::ZERO, Length::ZERO, leader_width, line_height);
+        // Create leader area, stacked at the caller's y_offset.
+        let leader_rect = Rect::new(Length::ZERO, y_offset, leader_width, line_height);
 
         // Create traits for leader, inheriting from parent
         let mut leader_traits = parent_traits.clone();

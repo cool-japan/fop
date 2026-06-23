@@ -1,5 +1,49 @@
 # TODO - Apache FOP Rust
 
+## Audit Findings (2026-06-23) — Discovered Gaps (fabrication audit, branch 0.1.3)
+
+A deep audit (beyond the loud-marker scan) found genuine gaps the checklists below
+over-claim as done. Build/tests/clippy are green, but these are real correctness /
+fidelity / security defects. This is the live convergence target for this session.
+`[sonnet]` / `[opus]` = implementation model routing.
+
+### Milestone 1 — Contained fixes (file-isolated, low cascade risk)
+- [x] [sonnet] AES-256 encryption uses deterministic SHA-derived salts/IVs → use an OS CSPRNG (`getrandom`, pure Rust; not `rand`) (`fop-render/src/pdf/security.rs:308-316,626-633`)
+- [x] [sonnet] ParallelRenderer builds an empty font cache → custom/embedded fonts silently become Helvetica under `--jobs N` (`fop-render/src/parallel.rs:45-53`)
+- [x] [sonnet] PNG indexed-color decoded as grayscale (index-as-gray) → wrong colors; use `png` EXPAND or palette lookup (`fop-pdf-renderer/src/image.rs:115-118`)
+- [x] [sonnet] PostScript `add_image` draws a gray box, never reads pixel data → emit real Level-2 `image`/`colorimage` (`fop-render/src/ps/mod.rs:499-533`)
+- [x] [sonnet] `font-size="1.5em"` stored as Percentage but `extract_font_size` ignores it → silently 12pt; add a Percentage arm resolving vs parent (`fop-core/.../builder/property_parser.rs` + `fop-layout/.../properties/extraction.rs`)
+- [x] [sonnet] FontRegistry's 14 standard fonts share 5 metrics objects → bold/italic use regular widths; add real AFM bold/oblique metrics (`fop-types/src/font_metrics.rs:724-756`)
+- [x] [sonnet] Inheritance registry lists only 14 of ~60 inheritable XSL-FO properties → add the rest from XSL-FO 1.1 §B (`fop-core/src/properties/property_list.rs:13-36`)
+- [x] [sonnet] Block height ignores `line-height` (always = font-size) → read `traits.line_height` (`fop-layout/.../engine/block_layout.rs:60`)
+- [x] [sonnet] Table outer-area height hardcoded 100pt, never updated → sum row heights after `layout_table` (`fop-layout/.../engine/mod.rs:520-549`)
+- [x] [opus] Font subsetting is a no-op (returns full font on both branches) → real TTF subsetting (rebuild glyf/loca/cmap/head/hhea/hmtx/maxp + checksums, or a pure-Rust subsetter) (`fop-render/src/pdf/font.rs:616-644`)
+- [x] [opus] PDF clip paths `W`/`W*` discarded (`path.clear()` "skip for now") → apply tiny-skia clip mask, restore on `Q` (`fop-pdf-renderer/src/content.rs:641-643` + rasterizer)
+- [x] [sonnet] PDF/UA-1 emits `/Marked true` + empty `/StructTreeRoot` → falsely claims compliance; make honest (error or stop emitting false markers) until real tagging exists (`fop-render/src/pdf/document/mod.rs:375-382`)
+
+### Milestone 2 — Layout architecture (LARGE, interdependent; rewrites area-tree geometry → cascades across the 3063-test suite. Do carefully/sequentially; hand off if budget runs out)
+- [x] [opus] `layout_block` emits ONE full-width area per text run — no word-wrap; wire real line-breaking (`fop-layout/.../engine/block_layout.rs:107-144`)
+- [x] [opus] Knuth-Plass breaker ignores glue stretch/shrink (greedy, not optimal) AND is never called by the engine — implement true adjustment-ratio/demerit model + wire it (`fop-layout/src/layout/knuth_plass.rs`)
+- [x] [opus] `PageBreaker::break_into_pages` never reparents areas (page containers stay empty) and is never invoked — real pagination + overflow detection (`fop-layout/src/layout/page_break.rs:65-161`)
+- [x] [opus] Multi-column overflow silently continues in last column instead of paginating (`fop-layout/.../engine/block_layout.rs:362-374`)
+- [x] [opus] `table-layout="auto"` builds an empty grid — cell content never measured; equal-width result (`fop-layout/.../engine/mod.rs:502-518`)
+- [x] [opus] `fo:marker` collection hardcodes `(starts_on_page=true, ends_on_page=true)` → running headers wrong on multi-chapter docs (`fop-layout/.../engine/page_layout.rs:845-848`)
+
+### Docs / honesty
+- [x] Correct the over-claiming `[x]` entries (font subsetting, Knuth-Plass) in this file, per-crate `TODO.md`, and `CHANGELOG.md` so they reflect reality.
+
+### Deferred refinements (surfaced WHILE fixing Milestone 2 — beyond the original audit; honest next layer, NOT regressions)
+- [ ] [opus] Block splitting across a page boundary: a block taller than the region-body stays whole (clips) instead of splitting; `split_area`/`count_line_areas` retained for it.
+- [ ] [opus] Widow/orphan control wired into the page-break decision (governs splitting; traits recorded but not yet enforced during pagination).
+- [ ] [sonnet] `fo:retrieve-marker` nested inside a block within `fo:static-content` (only direct children of static-content currently resolve a marker; pre-existing scope limit).
+- [ ] [opus] Newspaper-style multi-column balancing (cross-page multi-column currently fills sequentially — correct but unbalanced).
+- [ ] [sonnet] Conditional page-master selection (first/last/odd/even `conditional-page-master-reference`) — selection logic exists but is dormant in the live path.
+- [ ] [opus] Streaming engine (`streaming.rs`) lacks the multi-column + pagination parity the main engine now has.
+- [ ] [sonnet] Non-BMP (surrogate-pair) text: PDF `W`/`CIDToGIDMap` keyed by full code point is inconsistent for astral characters (pre-existing).
+- [ ] [sonnet] `pagination.rs` ~1930 lines — split its integration tests into a sibling module before further growth (2000-line policy).
+
+---
+
 ## Phase 5: Advanced Features
 
 ### Image Rendering

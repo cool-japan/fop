@@ -127,7 +127,25 @@ impl PageBreaker {
                 current_height = Length::ZERO;
             }
 
-            // Add child to current page (in real implementation, would reparent)
+            // Reparent the child under the current page's region-body and
+            // position it at the running vertical offset (region-relative y).
+            // This is the real reparenting that the previous implementation
+            // only pretended to do.
+            let region_id = area_tree
+                .children(current_page_id)
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    fop_types::FopError::Generic(
+                        "page area is missing its region-body child".to_string(),
+                    )
+                })?;
+            area_tree
+                .reparent(*child_id, region_id)
+                .map_err(fop_types::FopError::Generic)?;
+            if let Some(child_node) = area_tree.get_mut(*child_id) {
+                child_node.area.geometry.y = current_height;
+            }
             current_height += child_height;
 
             // Check for forced break-after
@@ -161,8 +179,16 @@ impl PageBreaker {
         Ok(page_ids)
     }
 
-    /// Check if we can break before an area, respecting keep constraints
-    fn can_break_before(
+    /// Check whether a page break may occur *before* the given area, honouring
+    /// keep constraints (`keep-together`, `keep-with-previous` on this area, and
+    /// `keep-with-next` on the preceding area).
+    ///
+    /// Returns `false` when a keep constraint forbids breaking before this
+    /// area, `true` otherwise. Used by both [`PageBreaker::break_into_pages`]
+    /// and the layout engine's pagination loop to decide whether an overflowing
+    /// block may start a new page on its own or must drag glued neighbours with
+    /// it. See the note inside about why widows/orphans do not participate.
+    pub fn can_break_before(
         &self,
         area_tree: &AreaTree,
         area_id: AreaId,
@@ -205,43 +231,31 @@ impl PageBreaker {
             }
         }
 
-        // Check orphans constraint - minimum lines at bottom of page before break
-        // Count line areas in previous blocks to see if we have enough lines
-        // before this break point
-        let orphans = current_area.orphans;
-        if orphans > 0 && index > 0 {
-            // Count line/text areas in the previous block (the one that would end on current page)
-            if let Some(prev_area_id) = all_children.get(index - 1) {
-                let line_count = self.count_line_areas(area_tree, *prev_area_id);
-                if line_count > 0 && line_count < orphans {
-                    // Not enough lines before the break - would create an orphan
-                    return false;
-                }
-            }
-        }
+        // Widows/orphans intentionally do NOT gate this decision.
+        //
+        // This predicate answers "may a page break occur *before* this whole
+        // block?" — i.e. the block moves to the next page in one piece. Widow
+        // and orphan control only constrains where a block may be *split*
+        // across a page boundary, which is a separate (currently deferred)
+        // concern; applying the line-count test here would wrongly glue every
+        // block shorter than the widow/orphan minimum to its predecessor. The
+        // `widows`/`orphans` traits remain recorded on each area for the future
+        // block-splitting implementation, and `count_line_areas` is retained as
+        // a public helper for that work.
 
-        // Check widows constraint - minimum lines at top of page after break
-        // Count line areas in the current block to see if we have enough lines
-        // after this break point
-        let widows = current_area.widows;
-        if widows > 0 {
-            let line_count = self.count_line_areas(area_tree, area_id);
-            if line_count > 0 && line_count < widows {
-                // Not enough lines after the break - would create a widow
-                return false;
-            }
-        }
-
-        // No constraints prevent breaking
+        // No keep constraint prevents breaking before this block.
         true
     }
 
-    /// Count the number of line areas within a block area
+    /// Count the number of line areas within a block area.
     ///
-    /// This is used for widow and orphan control. It counts text and line areas
-    /// that are direct or indirect children of the given area.
+    /// Counts `Line`, `Text`, and `Inline` areas that are direct or indirect
+    /// children of the given area. Retained as a public helper for the future
+    /// widow/orphan-aware block-splitting implementation (it no longer gates
+    /// [`PageBreaker::can_break_before`], which now considers keep constraints
+    /// only — see the note there).
     #[allow(clippy::only_used_in_recursion)]
-    fn count_line_areas(&self, area_tree: &AreaTree, area_id: AreaId) -> i32 {
+    pub fn count_line_areas(&self, area_tree: &AreaTree, area_id: AreaId) -> i32 {
         let mut count = 0;
 
         // Get the area
@@ -511,6 +525,48 @@ mod tests {
         // With 5 blocks of 200pt each (1000pt total) and content height 698pt,
         // should create at least 2 pages
         assert!(pages.len() >= 2);
+
+        // Real reparenting: the blocks must no longer hang off the root — they
+        // were moved under the pages' region-body areas.
+        assert!(
+            tree.children(root_id).is_empty(),
+            "all blocks must be reparented away from the root"
+        );
+
+        // Every page's single region-body must hold the blocks assigned to it,
+        // each positioned with a region-relative y that fits the content box,
+        // and the union of all region children must be exactly the 5 blocks.
+        let content_height = breaker.content_height();
+        let mut reparented_blocks = 0;
+        for page_id in &pages {
+            let regions = tree.children(*page_id);
+            assert_eq!(regions.len(), 1, "each page has exactly one region-body");
+            let region_id = regions[0];
+            assert_eq!(
+                tree.get(region_id)
+                    .expect("test: region exists")
+                    .area
+                    .area_type,
+                AreaType::Region
+            );
+            for block_id in tree.children(region_id) {
+                let block = tree.get(block_id).expect("test: block exists");
+                assert_eq!(block.area.area_type, AreaType::Block);
+                // Block's bottom edge must lie within the region content box.
+                let bottom = block.area.geometry.y + block.area.height();
+                assert!(
+                    bottom <= content_height,
+                    "reparented block overflows its page region: bottom {}pt > {}pt",
+                    bottom.to_pt(),
+                    content_height.to_pt()
+                );
+                reparented_blocks += 1;
+            }
+        }
+        assert_eq!(
+            reparented_blocks, 5,
+            "all 5 blocks must be reparented under a page region"
+        );
     }
 
     #[test]

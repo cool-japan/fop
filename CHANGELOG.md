@@ -5,6 +5,37 @@ All notable changes to the Apache FOP Rust implementation will be documented in 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Font subsetting** now performs real TrueType glyph subsetting via the pure-Rust `subsetter` crate; `create_simple_subset` previously returned the full font unchanged (e.g. DejaVu Sans 757 KB → 15 KB when only a few glyphs are used).
+- **Knuth-Plass line breaking** is now a real optimal line breaker (box/glue/penalty model, adjustment ratios, demerits, active-node frontier) and is wired into the layout engine; previously the engine emitted one full-width area per text run and the Knuth-Plass module was dead/greedy code.
+- **Pagination** now breaks content taller than the region-body across multiple pages with real area reparenting and repeated static content (headers/footers), honoring forced `break-before`/`break-after` and `keep-with-previous`/`-next`/`keep-together`; previously all flow content was placed on a single page and silently overflowed.
+- **Multi-column flows** now paginate across pages; previously content overflowed the last column off the page.
+- **`table-layout="auto"`** now measures cell content (real min/max content widths via font metrics) to size columns; previously it produced an empty grid and fell back to equal-width columns. Tables that are direct children of `fo:flow` now render (they previously produced no area).
+- **`fo:marker` / `fo:retrieve-marker`** running headers/footers now resolve per page (all four `retrieve-position` values; `retrieve-boundary` page / page-sequence / document); previously every page showed the same marker.
+- **Block height** now honors the `line-height` property; previously block height was always one font-size.
+- **`font-size="Xem"`** now resolves against the parent font-size; previously it silently rendered at 12 pt.
+- **Table outer-area height** now reflects real row content; previously hardcoded to 100 pt.
+- **PNG indexed-color images** in the pure-Rust PDF renderer are now expanded through the palette; previously palette indices were decoded as grayscale (wrong colors).
+- **PostScript image output** now emits real Level-2 `image`/`colorimage` raster data; previously a gray placeholder rectangle.
+- **Parallel rendering (`--jobs N`)** now embeds custom/system fonts; previously it silently fell back to built-in Helvetica.
+- **PDF clip paths (`W`/`W*`)** are now applied as real masks in the pure-Rust PDF renderer; previously discarded.
+
+### Changed
+
+- The 14 standard PDF fonts now carry distinct bold/italic AFM metrics; previously bold/italic variants reused the regular widths (wrong text measurement).
+- Property inheritance now covers the full set of ~60 XSL-FO 1.1 inheritable properties; previously only 14 were inherited.
+
+### Security
+
+- **AES-256 PDF encryption** now derives salts and the CBC IV from an OS CSPRNG (`getrandom`); previously they were deterministically derived via SHA-256 from the password/key, so identical inputs produced identical ciphertext.
+
+### Honesty
+
+- **PDF/UA-1** now returns an explicit "not implemented" error instead of emitting `/MarkInfo /Marked true` with an empty `/StructTreeRoot` that falsely claimed conformance. Full tagged-PDF support remains future work.
+
 ## [0.1.2] - 2026-05-16
 
 ### Added

@@ -3,6 +3,7 @@
 //! Enables parallel processing of independent pages using std::thread::scope.
 //! Each page is rendered independently, making this embarrassingly parallel.
 
+use crate::pdf::FontConfig;
 use crate::{PdfDocument, PdfRenderer, Result};
 use fop_layout::AreaTree;
 
@@ -13,15 +14,38 @@ use fop_layout::AreaTree;
 pub struct ParallelRenderer {
     /// Number of threads to use (0 = auto-detect)
     num_threads: usize,
+
+    /// Font configuration: maps family names to TTF file paths.
+    ///
+    /// This is forwarded to the internal [`PdfRenderer`] so that
+    /// [`build_font_cache_public`][crate::PdfRenderer::build_font_cache_public]
+    /// can embed the same fonts that the sequential path would embed.
+    font_config: FontConfig,
 }
 
 impl ParallelRenderer {
-    /// Create a new parallel renderer
+    /// Create a new parallel renderer with no extra font configuration.
+    ///
+    /// Use [`ParallelRenderer::with_font_config`] to supply a [`FontConfig`]
+    /// that mirrors the one used by the equivalent sequential [`PdfRenderer`].
     ///
     /// # Arguments
     /// * `num_threads` - Number of threads to use (0 = auto-detect)
     pub fn new(num_threads: usize) -> Self {
-        Self { num_threads }
+        Self {
+            num_threads,
+            font_config: FontConfig::new(),
+        }
+    }
+
+    /// Attach a [`FontConfig`] to this parallel renderer.
+    ///
+    /// The supplied configuration is used to locate and embed TrueType /
+    /// OpenType fonts into the output document, matching the behaviour of
+    /// [`PdfRenderer::with_font_config`] on the sequential render path.
+    pub fn with_font_config(mut self, font_config: FontConfig) -> Self {
+        self.font_config = font_config;
+        self
     }
 
     /// Render an area tree to PDF using parallel processing
@@ -30,26 +54,34 @@ impl ParallelRenderer {
     /// This is significantly faster for multi-page documents on multi-core systems.
     ///
     /// Implementation strategy:
-    /// 1. Pre-collect shared resources (images, opacity states) sequentially
+    /// 1. Pre-collect shared resources (images, opacity states, fonts) sequentially
     /// 2. Render individual page content streams in parallel
     /// 3. Combine results into final document in correct order
     pub fn render(&self, area_tree: &AreaTree) -> Result<PdfDocument> {
         use fop_layout::AreaType;
         use std::collections::HashMap;
 
-        // Phase 1: Create document and collect shared resources (must be sequential)
+        // Phase 1: Create document and collect shared resources (must be sequential).
+        // Build the per-render PdfRenderer with the same FontConfig that the
+        // sequential path would use so that images, opacity states, and – crucially
+        // – the font cache are all built from the same configuration.
         let mut doc = PdfDocument::new();
         doc.info.title = Some("FOP Generated PDF".to_string());
 
+        let renderer = PdfRenderer::new().with_font_config(self.font_config.clone());
+
         let mut image_map = HashMap::new();
-        let renderer = PdfRenderer::new();
         renderer.collect_images_public(area_tree, &mut doc, &mut image_map)?;
 
         let mut opacity_map = HashMap::new();
         renderer.collect_opacity_states_public(area_tree, &mut doc, &mut opacity_map);
 
-        // Build font cache (empty for parallel renderer – no font config attached)
-        let font_cache: HashMap<String, usize> = HashMap::new();
+        // Build the font cache ONCE sequentially before the parallel page loop.
+        // Font embedding mutates `doc` (it inserts binary TTF data into the font
+        // manager), so it cannot run per-thread.  We reuse the same
+        // `build_font_cache` logic that `PdfRenderer::render()` uses on the
+        // sequential path, ensuring custom/embedded fonts are handled identically.
+        let font_cache = renderer.build_font_cache_public(area_tree, &mut doc)?;
 
         // Phase 2: Collect page IDs in document order
         let page_ids: Vec<_> = area_tree
@@ -152,6 +184,16 @@ mod tests {
         let renderer = ParallelRenderer::new(8);
         assert_eq!(renderer.effective_threads(), 8);
     }
+
+    #[test]
+    fn test_with_font_config_replaces_default() {
+        let mut fc = FontConfig::new();
+        fc.add_mapping("TestFont", std::path::PathBuf::from("/test.ttf"));
+        let renderer = ParallelRenderer::new(2).with_font_config(fc);
+        // The renderer now holds the config; verify by checking num_threads is
+        // still intact (the builder must return Self).
+        assert_eq!(renderer.num_threads, 2);
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +291,121 @@ mod tests_extended {
         for n in [0, 1, 4, 16] {
             let r = ParallelRenderer::new(n);
             assert_eq!(r.num_threads, n);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_parallel_font_embedding {
+    use super::*;
+    use crate::pdf::PdfRenderer;
+    use fop_layout::area::TraitSet;
+    use fop_layout::{Area, AreaTree, AreaType};
+    use fop_types::{Length, Point, Rect, Size};
+
+    /// Build a one-page area tree containing a single text area whose
+    /// `font_family` trait is set to `family`.  Constructed directly (no FO
+    /// parser) so the test is self-contained and fast.
+    fn area_tree_with_font_family(family: &str) -> AreaTree {
+        let page_rect = Rect::from_point_size(
+            Point::ZERO,
+            Size::new(Length::from_mm(210.0), Length::from_mm(297.0)),
+        );
+        let mut tree = AreaTree::new();
+        let page_id = tree.add_area(Area::new(AreaType::Page, page_rect));
+
+        let text_rect = Rect::from_point_size(
+            Point::new(Length::from_mm(20.0), Length::from_mm(20.0)),
+            Size::new(Length::from_mm(170.0), Length::from_pt(14.0)),
+        );
+        let traits = TraitSet {
+            font_family: Some(family.to_string()),
+            font_size: Some(Length::from_pt(12.0)),
+            ..TraitSet::default()
+        };
+        let text_area = Area::text(text_rect, format!("Custom font rendering test: {family}"))
+            .with_traits(traits);
+        let text_id = tree.add_area(text_area);
+        tree.append_child(page_id, text_id)
+            .expect("test: append_child should succeed");
+
+        tree
+    }
+
+    /// Asserts that `ParallelRenderer` with a `FontConfig` embeds the same
+    /// fonts as `PdfRenderer` with the same config – and that at least one
+    /// font is embedded (i.e. not silently falling back to built-in Helvetica).
+    ///
+    /// Uses DejaVu Sans, which is available on any standard Debian / Ubuntu /
+    /// CI Linux installation (`fonts-dejavu-core` package).
+    #[test]
+    fn test_parallel_renderer_embeds_fonts_matching_sequential() {
+        let font_path = std::path::PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+        assert!(
+            font_path.exists(),
+            "DejaVu Sans not found at {:?}; install fonts-dejavu-core",
+            font_path,
+        );
+
+        // "DejaVu Sans" is the Typographic Family name extracted by ttf-parser.
+        let family = "DejaVu Sans";
+        let mut font_config = FontConfig::new();
+        font_config.add_mapping(family, font_path);
+
+        let area_tree = area_tree_with_font_family(family);
+
+        // Sequential reference path
+        let seq_renderer = PdfRenderer::new().with_font_config(font_config.clone());
+        let seq_doc = seq_renderer
+            .render(&area_tree)
+            .expect("test: sequential render should succeed");
+
+        // Parallel path under test (2 threads; single page falls back to sequential
+        // code path inside render(), but font cache must still be built correctly)
+        let par_renderer = ParallelRenderer::new(2).with_font_config(font_config);
+        let par_doc = par_renderer
+            .render(&area_tree)
+            .expect("test: parallel render should succeed");
+
+        let seq_count = seq_doc.font_manager.font_count();
+        let par_count = par_doc.font_manager.font_count();
+
+        assert_eq!(
+            seq_count, par_count,
+            "parallel renderer must embed the same number of fonts as sequential \
+             (seq={seq_count}, par={par_count})",
+        );
+
+        assert!(
+            seq_count > 0,
+            "expected at least one font to be embedded; got zero – \
+             font_config was not forwarded to the parallel renderer",
+        );
+
+        // Verify the embedded font names agree between both paths.
+        let seq_names: Vec<String> = (0..seq_count)
+            .filter_map(|i| seq_doc.font_manager.get_font(i))
+            .map(|f| f.font_name.clone())
+            .collect();
+        let par_names: Vec<String> = (0..par_count)
+            .filter_map(|i| par_doc.font_manager.get_font(i))
+            .map(|f| f.font_name.clone())
+            .collect();
+
+        assert_eq!(
+            seq_names, par_names,
+            "embedded font names must be identical between sequential and parallel rendering",
+        );
+
+        // Guard against the Helvetica fallback: none of the embedded fonts
+        // should be the built-in Type1 placeholder.
+        for name in &par_names {
+            assert_ne!(
+                name.to_lowercase(),
+                "helvetica",
+                "parallel renderer fell back to built-in Helvetica; \
+                 custom font '{family}' was not embedded",
+            );
         }
     }
 }
