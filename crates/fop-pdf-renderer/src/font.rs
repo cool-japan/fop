@@ -336,10 +336,43 @@ fn parse_bf_char_line(line: &str) -> Option<(u32, char)> {
     }
     let cid = parse_hex_u32(parts[0])?;
     let unicode_hex = parts[1].trim().trim_matches('<').trim_matches('>');
-    // Can be 4-char UTF-16BE hex: e.g. "30A2" → U+30A2
-    let code_point = u32::from_str_radix(unicode_hex, 16).ok()?;
-    let ch = char::from_u32(code_point)?;
-    Some((cid, ch))
+    decode_utf16be_hex_to_char(unicode_hex).map(|ch| (cid, ch))
+}
+
+/// Decode a UTF-16BE hex string from a ToUnicode CMap destination to a `char`.
+///
+/// Handles both:
+/// - 4-hex-digit BMP code points: `"0041"` → `'A'`
+/// - 8-hex-digit surrogate pairs:  `"D83DDE00"` → `'😀'` (U+1F600)
+///
+/// Returns `None` for malformed input or isolated / mismatched surrogates.
+fn decode_utf16be_hex_to_char(hex: &str) -> Option<char> {
+    match hex.len() {
+        4 => {
+            // BMP: single UTF-16 code unit
+            let cp = u32::from_str_radix(hex, 16).ok()?;
+            char::from_u32(cp)
+        }
+        8 => {
+            // Supplementary character encoded as a surrogate pair in UTF-16BE.
+            // High surrogate: first 4 hex digits (0xD800..=0xDBFF)
+            // Low surrogate:  last 4 hex digits (0xDC00..=0xDFFF)
+            let high = u32::from_str_radix(&hex[..4], 16).ok()?;
+            let low = u32::from_str_radix(&hex[4..], 16).ok()?;
+            if (0xD800..=0xDBFF).contains(&high) && (0xDC00..=0xDFFF).contains(&low) {
+                // Reconstruct the supplementary code point.
+                let cp = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                char::from_u32(cp)
+            } else {
+                None
+            }
+        }
+        _ => {
+            // Attempt direct hex parse for other even lengths (rare but legal).
+            let cp = u32::from_str_radix(hex, 16).ok()?;
+            char::from_u32(cp)
+        }
+    }
 }
 
 fn parse_bf_range_line(line: &str, map: &mut HashMap<u32, char>) {
@@ -572,6 +605,93 @@ mod tests {
         // At minimum CID 1 → 'A' should be present (or map could be empty if all fail)
         // The important thing is no panic
         let _ = map;
+    }
+
+    // -----------------------------------------------------------------------
+    // decode_utf16be_hex_to_char — non-BMP surrogate-pair decoding
+    // -----------------------------------------------------------------------
+
+    /// BMP characters: 4-hex-digit destination → direct Unicode scalar.
+    #[test]
+    fn test_decode_utf16be_bmp_char() {
+        assert_eq!(decode_utf16be_hex_to_char("0041"), Some('A'));
+        assert_eq!(decode_utf16be_hex_to_char("30A2"), Some('\u{30A2}')); // ア
+        assert_eq!(decode_utf16be_hex_to_char("0020"), Some(' '));
+    }
+
+    /// Astral characters: 8-hex-digit surrogate pair → supplementary scalar.
+    /// U+1F600 😀: high=D83D, low=DE00 → "D83DDE00"
+    #[test]
+    fn test_decode_utf16be_astral_char_emoji() {
+        let result = decode_utf16be_hex_to_char("D83DDE00");
+        assert_eq!(
+            result,
+            Some('\u{1F600}'),
+            "D83DDE00 should decode to U+1F600 😀"
+        );
+    }
+
+    /// U+10300 𐌀 (Old Italic A): high=D800, low=DF00 → "D800DF00"
+    #[test]
+    fn test_decode_utf16be_astral_char_old_italic() {
+        let result = decode_utf16be_hex_to_char("D800DF00");
+        assert_eq!(
+            result,
+            Some('\u{10300}'),
+            "D800DF00 should decode to U+10300 𐌀"
+        );
+    }
+
+    /// An isolated high surrogate must not produce a char (invalid UTF-16).
+    #[test]
+    fn test_decode_utf16be_isolated_high_surrogate_returns_none() {
+        // "D83D" is a valid high surrogate when paired, but invalid alone.
+        let result = decode_utf16be_hex_to_char("D83D");
+        // The 4-digit path tries to parse 0xD83D as a Unicode scalar,
+        // which fails because surrogates are not valid scalars in Rust.
+        assert!(
+            result.is_none(),
+            "Isolated high surrogate must not produce a char"
+        );
+    }
+
+    /// Mismatched surrogates must not produce a char.
+    #[test]
+    fn test_decode_utf16be_mismatched_surrogates_returns_none() {
+        // 0001 is not a valid low surrogate (0xDC00..=0xDFFF).
+        let result = decode_utf16be_hex_to_char("D83D0001");
+        assert!(
+            result.is_none(),
+            "Mismatched surrogates must not produce a char"
+        );
+    }
+
+    /// parse_bf_char_line must correctly parse an 8-hex-digit surrogate-pair dest.
+    #[test]
+    fn test_parse_bf_char_line_astral_surrogate_pair() {
+        // CID 0x14FD (GID 5373, U+10300 in DejaVu) → U+10300 encoded as D800DF00
+        let result = parse_bf_char_line("<14FD> <D800DF00>");
+        assert_eq!(
+            result,
+            Some((0x14FDu32, '\u{10300}')),
+            "parse_bf_char_line must decode 8-digit surrogate-pair destination",
+        );
+    }
+
+    /// parse_to_unicode must handle a CMap stream that uses surrogate-pair dests.
+    #[test]
+    fn test_parse_to_unicode_with_surrogate_pair_dest() {
+        // A ToUnicode CMap as generated by generate_to_unicode_cmap for U+1F600:
+        //   CID 0x0D80 → <D83DDE00> (UTF-16BE surrogate pair for U+1F600)
+        let cmap =
+            b"begincmap\n2 beginbfchar\n<0041> <0041>\n<0D80> <D83DDE00>\nendbfchar\nendcmap\n";
+        let map = parse_to_unicode(cmap);
+        assert_eq!(map.get(&0x0041), Some(&'A'), "BMP char must still parse");
+        assert_eq!(
+            map.get(&0x0D80),
+            Some(&'\u{1F600}'),
+            "CID 0x0D80 must map to U+1F600 😀 via surrogate pair",
+        );
     }
 
     // -----------------------------------------------------------------------

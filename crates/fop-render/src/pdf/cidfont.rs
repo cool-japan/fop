@@ -127,42 +127,74 @@ pub fn encode_text_utf16be(text: &str) -> String {
     result
 }
 
-/// Generate CIDToGIDMap stream for mapping CIDs to actual glyph IDs
+/// Generate CIDToGIDMap stream mapping original GIDs (CIDs) to new (subset) GIDs.
 ///
-/// Creates a binary stream where each CID (Unicode codepoint) maps to its
-/// actual glyph ID in the TrueType font. This is required when the font's
-/// glyph IDs don't match Unicode codepoints (which is common for CJK fonts).
+/// Per the module-level CID invariant in `fop_render::pdf::font`:
 ///
-/// Format: Binary stream where offset = CID * 2, value = uint16 GID (big-endian)
+/// > CID == original TrueType glyph ID
+///
+/// This stream is therefore indexed by the original (pre-subset) GID and each
+/// 2-byte entry contains the corresponding new (post-subset, renumbered) GID.
+/// A PDF viewer reads `CIDToGIDMap[cid * 2 .. cid * 2 + 2]` as a big-endian
+/// u16 to obtain the actual glyph index inside the embedded font program.
+///
+/// Because original GIDs are `u16` values (at most 65 535), the stream is at
+/// most 131 072 bytes (64 Ki entries × 2 bytes). In practice it is much smaller
+/// because we only allocate up to `max_orig_gid + 1` entries.
+///
+/// This function is correct for **all** Unicode scalars including astral
+/// characters (U+10000..=U+10FFFF): their original GIDs are ordinary u16 values,
+/// so no special surrogate-pair handling is needed here.
 ///
 /// # Arguments
-/// * `char_to_glyph` - Mapping from characters to their glyph IDs in the font
-/// * `used_chars` - Set of characters actually used in the document
+/// * `char_to_new_glyph` — mapping from characters to their **new** (post-subset) GIDs.
+/// * `char_to_orig_glyph` — mapping from characters to their **original** (pre-subset) GIDs.
+///   When non-empty this is authoritative; when empty the function falls back to
+///   treating `char_to_new_glyph` as an identity map (CID == new GID).
 ///
 /// # Returns
-/// Binary data suitable for embedding as a PDF stream
+/// Binary data suitable for embedding as a PDF stream object.
 pub fn generate_cidtogidmap_stream(
-    char_to_glyph: &std::collections::HashMap<char, u16>,
-    used_chars: &std::collections::BTreeSet<char>,
+    char_to_new_glyph: &std::collections::HashMap<char, u16>,
+    char_to_orig_glyph: &std::collections::HashMap<char, u16>,
 ) -> Vec<u8> {
-    // Find max CID (Unicode value) we'll use
-    let max_cid = used_chars.iter().map(|&c| c as u32).max().unwrap_or(0);
-
-    // Create byte array: 2 bytes per CID
-    let mut map = vec![0u8; ((max_cid + 1) * 2) as usize];
-
-    // Fill in mappings for used characters
-    for &ch in used_chars.iter() {
-        let cid = ch as u32;
-        if let Some(&gid) = char_to_glyph.get(&ch) {
-            let offset = (cid * 2) as usize;
-            // Big-endian uint16
-            map[offset] = (gid >> 8) as u8;
-            map[offset + 1] = (gid & 0xFF) as u8;
-        }
+    if char_to_orig_glyph.is_empty() && char_to_new_glyph.is_empty() {
+        // No mappings at all — return a minimal 2-byte stream (CID 0 → GID 0).
+        return vec![0u8; 2];
     }
 
-    map
+    if !char_to_orig_glyph.is_empty() {
+        // Preferred path: orig_gid is the CID, new_gid is the GID in the subset.
+        let max_orig_gid = char_to_orig_glyph.values().copied().max().unwrap_or(0) as usize;
+
+        // Allocate stream: 2 bytes per CID slot.  Slots with no mapping stay 0
+        // (→ GID 0 = .notdef), which is the correct fallback.
+        let mut stream = vec![0u8; (max_orig_gid + 1) * 2];
+
+        for (&ch, &orig_gid) in char_to_orig_glyph.iter() {
+            if let Some(&new_gid) = char_to_new_glyph.get(&ch) {
+                let offset = (orig_gid as usize) * 2;
+                // Big-endian u16
+                stream[offset] = (new_gid >> 8) as u8;
+                stream[offset + 1] = (new_gid & 0xFF) as u8;
+            }
+        }
+
+        stream
+    } else {
+        // Fallback: no orig map — treat new GID as CID (identity subset, BMP only).
+        // This path is hit for non-subsetted fonts; since orig == new in an
+        // un-subsetted font this is still consistent.
+        let max_cid = char_to_new_glyph.values().copied().max().unwrap_or(0) as usize;
+
+        let mut stream = vec![0u8; (max_cid + 1) * 2];
+        for (&_ch, &gid) in char_to_new_glyph.iter() {
+            let offset = (gid as usize) * 2;
+            stream[offset] = (gid >> 8) as u8;
+            stream[offset + 1] = (gid & 0xFF) as u8;
+        }
+        stream
+    }
 }
 
 #[cfg(test)]
@@ -280,26 +312,49 @@ mod tests_extended {
 
     #[test]
     fn test_generate_cidtogidmap_stream_empty() {
-        use std::collections::{BTreeSet, HashMap};
-        let char_to_glyph: HashMap<char, u16> = HashMap::new();
-        let used_chars: BTreeSet<char> = BTreeSet::new();
-        let map = generate_cidtogidmap_stream(&char_to_glyph, &used_chars);
-        // Empty used_chars → max_cid = 0 → 2 bytes (map of size (0+1)*2=2)
+        use std::collections::HashMap;
+        let char_to_new_glyph: HashMap<char, u16> = HashMap::new();
+        let char_to_orig_glyph: HashMap<char, u16> = HashMap::new();
+        let map = generate_cidtogidmap_stream(&char_to_new_glyph, &char_to_orig_glyph);
+        // Both maps empty → minimal 2-byte stream.
         assert_eq!(map, vec![0u8; 2]);
     }
 
     #[test]
     fn test_generate_cidtogidmap_stream_single_char() {
-        use std::collections::{BTreeSet, HashMap};
-        let mut char_to_glyph: HashMap<char, u16> = HashMap::new();
-        char_to_glyph.insert('A', 36);
-        let mut used_chars: BTreeSet<char> = BTreeSet::new();
-        used_chars.insert('A');
-        let map = generate_cidtogidmap_stream(&char_to_glyph, &used_chars);
-        // 'A' is U+0041 = 65; map has 2*(65+1)=132 bytes
-        assert_eq!(map.len(), 132);
-        // At offset 65*2=130: big-endian 36 = 0x00, 0x24
-        assert_eq!(map[130], 0x00);
-        assert_eq!(map[131], 0x24);
+        use std::collections::HashMap;
+        // 'A' has orig GID 36 (arbitrary in this test) and new GID 1.
+        // CIDToGIDMap[36] = 1 → stream length = (36+1)*2 = 74 bytes.
+        let mut char_to_new_glyph: HashMap<char, u16> = HashMap::new();
+        char_to_new_glyph.insert('A', 1);
+        let mut char_to_orig_glyph: HashMap<char, u16> = HashMap::new();
+        char_to_orig_glyph.insert('A', 36);
+        let map = generate_cidtogidmap_stream(&char_to_new_glyph, &char_to_orig_glyph);
+        // Stream is (36+1)*2 = 74 bytes.
+        assert_eq!(map.len(), 74);
+        // At offset 36*2=72: big-endian 1 = 0x00, 0x01
+        assert_eq!(map[72], 0x00);
+        assert_eq!(map[73], 0x01);
+    }
+
+    /// Non-BMP character (U+1F600 😀) must have its orig GID (a u16) as the CID
+    /// and the new (post-subset) GID as the value in the CIDToGIDMap stream.
+    /// The CID must fit in u16 — no 0x1F600 (>u16) should appear as an index.
+    #[test]
+    fn test_generate_cidtogidmap_stream_astral_char() {
+        use std::collections::HashMap;
+        // Hypothetical: orig GID 3456 (a realistic u16), new GID 5.
+        let emoji = '\u{1F600}';
+        let mut char_to_new_glyph: HashMap<char, u16> = HashMap::new();
+        char_to_new_glyph.insert(emoji, 5);
+        let mut char_to_orig_glyph: HashMap<char, u16> = HashMap::new();
+        char_to_orig_glyph.insert(emoji, 3456);
+        let map = generate_cidtogidmap_stream(&char_to_new_glyph, &char_to_orig_glyph);
+        // Stream size = (3456+1)*2 = 6914 bytes (not ~512KB as the old code did).
+        assert_eq!(map.len(), (3456 + 1) * 2);
+        // CIDToGIDMap[3456] = 5
+        let offset = 3456 * 2;
+        assert_eq!(map[offset], 0x00); // high byte of 5
+        assert_eq!(map[offset + 1], 0x05); // low byte of 5
     }
 }

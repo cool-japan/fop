@@ -4,7 +4,11 @@
 //! static-content (header/footer/sidebars), and marker collection/retrieval.
 
 use crate::area::{Area, AreaTree, AreaType, TraitSet};
-use crate::layout::{extract_traits, BlockLayoutContext, PageNumberResolver};
+use crate::layout::{
+    extract_end_indent, extract_keep_constraint, extract_space_after, extract_space_before,
+    extract_start_indent, extract_text_indent, extract_traits, BlockLayoutContext,
+    PageNumberResolver, TextAlign,
+};
 use fop_core::{FoArena, FoNodeData, NodeId, PropertyId};
 use fop_types::{Length, Point, Rect, Result, Size};
 
@@ -521,40 +525,15 @@ impl LayoutEngine {
                 .append_child(page_area_id, area_id)
                 .map_err(fop_types::FopError::Generic)?;
 
-            // Layout block children with stacking
+            // Layout block children with stacking.  Route every child through
+            // `layout_static_block_with_markers` so that `fo:retrieve-marker`
+            // elements are resolved at any nesting depth (not only as direct
+            // children of the static-content node).
             let children = fo_tree.children(node_id);
             let mut block_ctx = BlockLayoutContext::new(static_rect.width);
 
             for child_id in children {
-                // Check if this is a retrieve-marker and handle it specially:
-                // resolve it against THIS page's marker context (honouring
-                // retrieve-position and retrieve-boundary).
-                if let Some(child_node) = fo_tree.get(child_id) {
-                    if let FoNodeData::RetrieveMarker {
-                        retrieve_class_name,
-                        retrieve_position,
-                        properties: retrieve_props,
-                    } = &child_node.data
-                    {
-                        let boundary = RetrieveBoundaryScope::from_properties(retrieve_props);
-                        if let Some(marker_node_id) =
-                            markers.resolve(retrieve_class_name, *retrieve_position, boundary)
-                        {
-                            self.layout_marker_content(
-                                fo_tree,
-                                marker_node_id,
-                                area_tree,
-                                area_id,
-                                block_ctx.current_y,
-                                static_rect.width,
-                                resolver,
-                            )?;
-                        }
-                        continue;
-                    }
-                }
-
-                if let Some(child_area_id) = self.layout_block(
+                if let Some(child_area_id) = self.layout_static_block_with_markers(
                     fo_tree,
                     child_id,
                     area_tree,
@@ -562,6 +541,7 @@ impl LayoutEngine {
                     block_ctx.current_y,
                     static_rect.width,
                     resolver,
+                    markers,
                 )? {
                     if let Some(child_area) = area_tree.get(child_area_id) {
                         block_ctx.current_y = child_area.area.geometry.y + child_area.area.height();
@@ -572,6 +552,399 @@ impl LayoutEngine {
             Ok(Some(area_id))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Layout a block-level node in a static-content subtree, resolving any
+    /// `fo:retrieve-marker` descendants against the page's [`PageMarkerView`].
+    ///
+    /// This is the marker-aware counterpart of [`LayoutEngine::layout_block`].
+    /// It is used exclusively within the static-content layout path so that
+    /// `fo:retrieve-marker` elements nested at arbitrary depth inside blocks
+    /// (e.g. `<fo:block><fo:retrieve-marker .../></fo:block>`) are resolved
+    /// and rendered, not silently dropped.
+    ///
+    /// Behaviour per node variant:
+    ///
+    /// * `RetrieveMarker` — resolved against `markers`; its content is laid out
+    ///   at `y_offset` via [`Self::layout_marker_content`].  Returns `None`
+    ///   (no block area created) when the marker does not resolve.
+    /// * `Block` / `BlockContainer` — a block area is created (same geometry as
+    ///   [`Self::layout_block`]) and its children are iterated.  `RetrieveMarker`
+    ///   children are resolved inline; `Block`/`BlockContainer` children recurse
+    ///   into this method; all other inline children (`Text`, `Inline`,
+    ///   `BasicLink`, `Leader`, `PageNumber`, `PageNumberCitation`, `Footnote`)
+    ///   are handled the same way as in [`Self::layout_block`].
+    /// * Everything else — delegated to [`Self::layout_block`] unchanged so
+    ///   tables, list-blocks, external-graphics, etc. still work.
+    ///
+    /// `layout_block` itself is **not** modified, preserving the main-flow
+    /// layout path and keeping the existing test suite unaffected.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn layout_static_block_with_markers(
+        &self,
+        fo_tree: &FoArena,
+        node_id: NodeId,
+        area_tree: &mut AreaTree,
+        parent_area: crate::area::AreaId,
+        y_offset: Length,
+        available_width: Length,
+        resolver: &mut PageNumberResolver,
+        markers: &PageMarkerView,
+    ) -> Result<Option<crate::area::AreaId>> {
+        let node = fo_tree
+            .get(node_id)
+            .ok_or_else(|| fop_types::FopError::Generic(format!("Node {} not found", node_id)))?;
+
+        match &node.data {
+            // ---- Direct retrieve-marker child of static-content --------
+            FoNodeData::RetrieveMarker {
+                retrieve_class_name,
+                retrieve_position,
+                properties: retrieve_props,
+            } => {
+                let boundary = RetrieveBoundaryScope::from_properties(retrieve_props);
+                if let Some(marker_node_id) =
+                    markers.resolve(retrieve_class_name, *retrieve_position, boundary)
+                {
+                    self.layout_marker_content(
+                        fo_tree,
+                        marker_node_id,
+                        area_tree,
+                        parent_area,
+                        y_offset,
+                        available_width,
+                        resolver,
+                    )?;
+                }
+                // RetrieveMarker does not produce a block area of its own.
+                Ok(None)
+            }
+
+            // ---- fo:block and fo:block-container -----------------------
+            FoNodeData::Block { properties } | FoNodeData::BlockContainer { properties } => {
+                // Geometry / spacing — mirrors layout_block exactly.
+                let traits = extract_traits(properties);
+                let space_before = extract_space_before(properties);
+                let space_after = extract_space_after(properties);
+                let start_indent = extract_start_indent(properties);
+                let end_indent = extract_end_indent(properties);
+                let text_indent = extract_text_indent(properties);
+                let keep_constraint = extract_keep_constraint(properties);
+
+                let line_height = traits
+                    .line_height
+                    .or(traits.font_size)
+                    .unwrap_or(Length::from_pt(12.0));
+
+                let content_width = available_width - start_indent - end_indent;
+
+                let mut block_ctx = BlockLayoutContext::new(content_width);
+                block_ctx.current_y = y_offset;
+                let mut block_rect = block_ctx.allocate_with_spacing(
+                    content_width,
+                    line_height,
+                    space_before,
+                    space_after,
+                );
+                block_rect.x = start_indent;
+
+                let mut area = Area::new(AreaType::Block, block_rect).with_traits(traits.clone());
+
+                if keep_constraint.has_constraint() {
+                    area = area.with_keep_constraint(keep_constraint);
+                }
+
+                let area_id = area_tree.add_area(area);
+                area_tree
+                    .append_child(parent_area, area_id)
+                    .map_err(fop_types::FopError::Generic)?;
+
+                let text_align = traits.text_align.unwrap_or(TextAlign::Left);
+
+                // Iterate children, special-casing RetrieveMarker and nested blocks.
+                let children = fo_tree.children(node_id);
+                let mut is_first_line = true;
+                let mut content_y = Length::ZERO;
+
+                for child_id in children {
+                    if let Some(child_node) = fo_tree.get(child_id) {
+                        match &child_node.data {
+                            // ---- Resolved retrieve-marker ---------------
+                            FoNodeData::RetrieveMarker {
+                                retrieve_class_name,
+                                retrieve_position,
+                                properties: retrieve_props,
+                            } => {
+                                let boundary =
+                                    RetrieveBoundaryScope::from_properties(retrieve_props);
+                                if let Some(marker_node_id) = markers.resolve(
+                                    retrieve_class_name,
+                                    *retrieve_position,
+                                    boundary,
+                                ) {
+                                    self.layout_marker_content(
+                                        fo_tree,
+                                        marker_node_id,
+                                        area_tree,
+                                        area_id,
+                                        content_y,
+                                        content_width,
+                                        resolver,
+                                    )?;
+                                    // Advance past the marker's content (one
+                                    // line height — marker children are blocks
+                                    // so they each have their own geometry, but
+                                    // we advance the inline cursor conservatively
+                                    // to avoid overlapping the next sibling).
+                                    content_y += line_height;
+                                }
+                                is_first_line = false;
+                            }
+
+                            // ---- Nested block/block-container ———————————
+                            FoNodeData::Block { .. } | FoNodeData::BlockContainer { .. } => {
+                                // Recurse with the same marker context.
+                                if let Some(child_area_id) = self.layout_static_block_with_markers(
+                                    fo_tree,
+                                    child_id,
+                                    area_tree,
+                                    area_id,
+                                    content_y,
+                                    content_width,
+                                    resolver,
+                                    markers,
+                                )? {
+                                    if let Some(child_area) = area_tree.get(child_area_id) {
+                                        content_y =
+                                            child_area.area.geometry.y + child_area.area.height();
+                                    }
+                                }
+                                is_first_line = false;
+                            }
+
+                            // ---- Inline text run ————————————————————————
+                            FoNodeData::Text(text) => {
+                                let mut text_traits = traits.clone();
+                                text_traits.text_align = Some(text_align);
+                                let first_indent = if is_first_line {
+                                    text_indent
+                                } else {
+                                    Length::ZERO
+                                };
+                                let new_y = self.emit_text_lines(
+                                    area_tree,
+                                    area_id,
+                                    text,
+                                    &text_traits,
+                                    text_align,
+                                    content_width,
+                                    first_indent,
+                                    content_y,
+                                    line_height,
+                                )?;
+                                if new_y != content_y {
+                                    is_first_line = false;
+                                    content_y = new_y;
+                                }
+                            }
+
+                            // ---- fo:basic-link —————————————————————————
+                            FoNodeData::BasicLink {
+                                external_destination,
+                                internal_destination,
+                                properties: link_props,
+                            } => {
+                                let mut link_traits = extract_traits(link_props);
+                                link_traits.text_align = Some(text_align);
+                                link_traits.link_destination = external_destination
+                                    .clone()
+                                    .or_else(|| internal_destination.clone());
+
+                                let link_children = fo_tree.children(child_id);
+                                let had_children = !link_children.is_empty();
+                                for link_child_id in link_children {
+                                    self.layout_inline(
+                                        fo_tree,
+                                        link_child_id,
+                                        area_tree,
+                                        area_id,
+                                        content_width,
+                                        line_height,
+                                        &link_traits,
+                                        if is_first_line {
+                                            text_indent
+                                        } else {
+                                            Length::ZERO
+                                        },
+                                        content_y,
+                                    )?;
+                                    is_first_line = false;
+                                }
+                                if had_children {
+                                    content_y += line_height;
+                                }
+                            }
+
+                            // ---- fo:inline —————————————————————————————
+                            FoNodeData::Inline {
+                                properties: inline_props,
+                            } => {
+                                let inline_traits = extract_traits(inline_props);
+                                let inline_children = fo_tree.children(child_id);
+                                let had_children = !inline_children.is_empty();
+                                for inline_child_id in inline_children {
+                                    self.layout_inline(
+                                        fo_tree,
+                                        inline_child_id,
+                                        area_tree,
+                                        area_id,
+                                        content_width,
+                                        line_height,
+                                        &inline_traits,
+                                        if is_first_line {
+                                            text_indent
+                                        } else {
+                                            Length::ZERO
+                                        },
+                                        content_y,
+                                    )?;
+                                    is_first_line = false;
+                                }
+                                if had_children {
+                                    content_y += line_height;
+                                }
+                            }
+
+                            // ---- fo:leader —————————————————————————————
+                            FoNodeData::Leader {
+                                properties: leader_props,
+                            } => {
+                                self.layout_leader(
+                                    fo_tree,
+                                    child_id,
+                                    leader_props,
+                                    area_tree,
+                                    area_id,
+                                    content_width,
+                                    line_height,
+                                    &traits,
+                                    content_y,
+                                )?;
+                                is_first_line = false;
+                                content_y += line_height;
+                            }
+
+                            // ---- fo:page-number-citation ————————————————
+                            FoNodeData::PageNumberCitation {
+                                ref_id,
+                                properties: citation_props,
+                            } => {
+                                let mut citation_traits = extract_traits(citation_props);
+                                citation_traits.text_align = Some(text_align);
+                                let x_offset = if is_first_line {
+                                    text_indent
+                                } else {
+                                    Length::ZERO
+                                };
+                                let line_width = if is_first_line {
+                                    content_width - text_indent
+                                } else {
+                                    content_width
+                                };
+                                let text_rect =
+                                    Rect::new(x_offset, content_y, line_width, line_height);
+                                let citation_area = Area::text(text_rect, "0".to_string())
+                                    .with_traits(citation_traits);
+                                let citation_id = area_tree.add_area(citation_area);
+                                resolver.register_citation(citation_id, ref_id.clone());
+                                area_tree
+                                    .append_child(area_id, citation_id)
+                                    .map_err(fop_types::FopError::Generic)?;
+                                is_first_line = false;
+                                content_y += line_height;
+                            }
+
+                            // ---- fo:footnote ————————————————————————————
+                            FoNodeData::Footnote { .. } => {
+                                self.layout_footnote(
+                                    fo_tree,
+                                    child_id,
+                                    area_tree,
+                                    area_id,
+                                    parent_area,
+                                    content_width,
+                                    line_height,
+                                    &traits,
+                                    if is_first_line {
+                                        text_indent
+                                    } else {
+                                        Length::ZERO
+                                    },
+                                    content_y,
+                                    resolver,
+                                )?;
+                                is_first_line = false;
+                                content_y += line_height;
+                            }
+
+                            // ---- fo:page-number ————————————————————————
+                            FoNodeData::PageNumber {
+                                properties: page_num_props,
+                            } => {
+                                let mut pn_traits = extract_traits(page_num_props);
+                                pn_traits.text_align = Some(text_align);
+                                let x_offset = if is_first_line {
+                                    text_indent
+                                } else {
+                                    Length::ZERO
+                                };
+                                let line_width = if is_first_line {
+                                    content_width - text_indent
+                                } else {
+                                    content_width
+                                };
+                                let page_num_str = resolver.current_page().to_string();
+                                let pn_rect =
+                                    Rect::new(x_offset, content_y, line_width, line_height);
+                                let pn_area =
+                                    Area::text(pn_rect, page_num_str).with_traits(pn_traits);
+                                let pn_id = area_tree.add_area(pn_area);
+                                area_tree
+                                    .append_child(area_id, pn_id)
+                                    .map_err(fop_types::FopError::Generic)?;
+                                is_first_line = false;
+                                content_y += line_height;
+                            }
+
+                            // ---- Everything else ————————————————————————
+                            _ => {}
+                        }
+                    }
+                }
+
+                let content_height = content_y.max(line_height);
+                if let Some(block_node) = area_tree.get_mut(area_id) {
+                    block_node.area.geometry.height = content_height;
+                }
+
+                if let Some(id) = &node.id {
+                    resolver.register_element(id.clone(), area_id);
+                }
+
+                Ok(Some(area_id))
+            }
+
+            // ---- Anything else: delegate to normal layout_block --------
+            _ => self.layout_block(
+                fo_tree,
+                node_id,
+                area_tree,
+                parent_area,
+                y_offset,
+                available_width,
+                resolver,
+            ),
         }
     }
 
@@ -601,5 +974,388 @@ impl LayoutEngine {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::area::{AreaContent, AreaType};
+    use fop_core::tree::RetrievePosition;
+    use fop_core::{FoNode, FoNodeData, PropertyList};
+
+    fn make_engine() -> LayoutEngine {
+        LayoutEngine::new()
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: walk every area in the tree looking for Text areas whose content
+    // contains the given needle string.
+    // -----------------------------------------------------------------------
+    fn has_text_in_area(area_tree: &crate::area::AreaTree, needle: &str) -> bool {
+        for (_, node) in area_tree.iter() {
+            if let Some(AreaContent::Text(text)) = &node.area.content {
+                if text.contains(needle) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Collect all areas that are descendants of any `Header` area, returning
+    /// their text content strings.
+    fn header_texts(area_tree: &crate::area::AreaTree) -> Vec<String> {
+        // First, find all header area ids.
+        let mut header_ids: Vec<crate::area::AreaId> = Vec::new();
+        for (id, node) in area_tree.iter() {
+            if matches!(node.area.area_type, AreaType::Header) {
+                header_ids.push(id);
+            }
+        }
+
+        // Collect all descendant text areas of any header.
+        let mut texts = Vec::new();
+        for header_id in &header_ids {
+            collect_descendant_texts(area_tree, *header_id, &mut texts);
+        }
+        texts
+    }
+
+    fn collect_descendant_texts(
+        area_tree: &crate::area::AreaTree,
+        area_id: crate::area::AreaId,
+        out: &mut Vec<String>,
+    ) {
+        if let Some(node) = area_tree.get(area_id) {
+            if let Some(AreaContent::Text(t)) = &node.area.content {
+                out.push(t.clone());
+            }
+            // Recurse into children.
+            let children = area_tree.children(area_id);
+            for child_id in children {
+                collect_descendant_texts(area_tree, child_id, out);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 (regression): direct child retrieve-marker still resolves.
+    //
+    // Structure:
+    //   PageSequence
+    //   ├── StaticContent("xsl-region-before")
+    //   │   └── RetrieveMarker(class="chap", position=FirstStartingWithinPage)
+    //   └── Flow("xsl-region-body")
+    //       └── Block
+    //           ├── Marker(class="chap")
+    //           │   └── Block → Text("Direct Title")
+    //           └── Text("body")
+    // -----------------------------------------------------------------------
+    #[test]
+    fn retrieve_marker_direct_child_of_static_content_resolves() {
+        let mut fo_tree = FoArena::new();
+        let root = fo_tree.add_node(FoNode::new(FoNodeData::Root));
+
+        let page_seq = fo_tree.add_node(FoNode::new(FoNodeData::PageSequence {
+            master_reference: "A4".to_string(),
+            format: "1".to_string(),
+            grouping_separator: None,
+            grouping_size: None,
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(root, page_seq)
+            .expect("test: should succeed");
+
+        // --- static-content with a DIRECT child retrieve-marker ---
+        let header = fo_tree.add_node(FoNode::new(FoNodeData::StaticContent {
+            flow_name: "xsl-region-before".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(page_seq, header)
+            .expect("test: should succeed");
+
+        let retrieve = fo_tree.add_node(FoNode::new(FoNodeData::RetrieveMarker {
+            retrieve_class_name: "chap".to_string(),
+            retrieve_position: RetrievePosition::FirstStartingWithinPage,
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(header, retrieve)
+            .expect("test: should succeed");
+
+        // --- flow ---
+        let flow = fo_tree.add_node(FoNode::new(FoNodeData::Flow {
+            flow_name: "xsl-region-body".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(page_seq, flow)
+            .expect("test: should succeed");
+
+        let body_block = fo_tree.add_node(FoNode::new(FoNodeData::Block {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(flow, body_block)
+            .expect("test: should succeed");
+
+        // Marker inside the flow block
+        let marker = fo_tree.add_node(FoNode::new(FoNodeData::Marker {
+            marker_class_name: "chap".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(body_block, marker)
+            .expect("test: should succeed");
+
+        // Marker content: a block with text
+        let marker_block = fo_tree.add_node(FoNode::new(FoNodeData::Block {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(marker, marker_block)
+            .expect("test: should succeed");
+        let marker_text =
+            fo_tree.add_node(FoNode::new(FoNodeData::Text("Direct Title".to_string())));
+        fo_tree
+            .append_child(marker_block, marker_text)
+            .expect("test: should succeed");
+
+        // Body text
+        let body_text = fo_tree.add_node(FoNode::new(FoNodeData::Text("body".to_string())));
+        fo_tree
+            .append_child(body_block, body_text)
+            .expect("test: should succeed");
+
+        let engine = make_engine();
+        let area_tree = engine
+            .layout(&fo_tree)
+            .expect("test: layout should succeed");
+
+        // The header's descendant areas must contain the marker text.
+        // `emit_text_lines` may break text into per-word areas, so join them.
+        let header_text_list = header_texts(&area_tree);
+        let joined = header_text_list.join(" ");
+        assert!(
+            joined.contains("Direct") && joined.contains("Title"),
+            "direct-child retrieve-marker must resolve: expected 'Direct Title' words in header \
+             areas, got: {header_text_list:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 (new feature): retrieve-marker nested inside a block within
+    // static-content resolves.
+    //
+    // Structure:
+    //   PageSequence
+    //   ├── StaticContent("xsl-region-before")
+    //   │   └── Block            ← outer block (NOT a direct retrieve-marker)
+    //   │       └── RetrieveMarker(class="nested-chap", FirstStartingWithinPage)
+    //   └── Flow("xsl-region-body")
+    //       └── Block
+    //           ├── Marker(class="nested-chap")
+    //           │   └── Block → Text("Nested Chapter Title")
+    //           └── Text("body text")
+    // -----------------------------------------------------------------------
+    #[test]
+    fn retrieve_marker_nested_in_block_within_static_content_resolves() {
+        let mut fo_tree = FoArena::new();
+        let root = fo_tree.add_node(FoNode::new(FoNodeData::Root));
+
+        let page_seq = fo_tree.add_node(FoNode::new(FoNodeData::PageSequence {
+            master_reference: "A4".to_string(),
+            format: "1".to_string(),
+            grouping_separator: None,
+            grouping_size: None,
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(root, page_seq)
+            .expect("test: should succeed");
+
+        // --- static-content: the retrieve-marker is INSIDE a block ---
+        let header = fo_tree.add_node(FoNode::new(FoNodeData::StaticContent {
+            flow_name: "xsl-region-before".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(page_seq, header)
+            .expect("test: should succeed");
+
+        // Outer block that wraps the retrieve-marker
+        let outer_block = fo_tree.add_node(FoNode::new(FoNodeData::Block {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(header, outer_block)
+            .expect("test: should succeed");
+
+        // The retrieve-marker is a child of the outer block (not direct child of static-content)
+        let retrieve = fo_tree.add_node(FoNode::new(FoNodeData::RetrieveMarker {
+            retrieve_class_name: "nested-chap".to_string(),
+            retrieve_position: RetrievePosition::FirstStartingWithinPage,
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(outer_block, retrieve)
+            .expect("test: should succeed");
+
+        // --- flow ---
+        let flow = fo_tree.add_node(FoNode::new(FoNodeData::Flow {
+            flow_name: "xsl-region-body".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(page_seq, flow)
+            .expect("test: should succeed");
+
+        let body_block = fo_tree.add_node(FoNode::new(FoNodeData::Block {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(flow, body_block)
+            .expect("test: should succeed");
+
+        // Marker inside the flow block
+        let marker = fo_tree.add_node(FoNode::new(FoNodeData::Marker {
+            marker_class_name: "nested-chap".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(body_block, marker)
+            .expect("test: should succeed");
+
+        // Marker content: a block with text — this is what should appear in the header
+        let marker_block = fo_tree.add_node(FoNode::new(FoNodeData::Block {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(marker, marker_block)
+            .expect("test: should succeed");
+        let marker_text = fo_tree.add_node(FoNode::new(FoNodeData::Text(
+            "Nested Chapter Title".to_string(),
+        )));
+        fo_tree
+            .append_child(marker_block, marker_text)
+            .expect("test: should succeed");
+
+        // Body text
+        let body_text = fo_tree.add_node(FoNode::new(FoNodeData::Text("body text".to_string())));
+        fo_tree
+            .append_child(body_block, body_text)
+            .expect("test: should succeed");
+
+        let engine = make_engine();
+        let area_tree = engine
+            .layout(&fo_tree)
+            .expect("test: layout should succeed");
+
+        // The header must contain the marker text from the NESTED retrieve-marker.
+        // `emit_text_lines` may break text into per-word areas, so join them.
+        let header_text_list = header_texts(&area_tree);
+        let joined = header_text_list.join(" ");
+        assert!(
+            joined.contains("Nested") && joined.contains("Chapter") && joined.contains("Title"),
+            "nested retrieve-marker must resolve: expected 'Nested Chapter Title' words in \
+             header areas, got: {header_text_list:?}"
+        );
+
+        // The header should also have a Block area (outer_block).
+        let mut has_header = false;
+        for (_, node) in area_tree.iter() {
+            if matches!(node.area.area_type, AreaType::Header) {
+                has_header = true;
+                break;
+            }
+        }
+        assert!(has_header, "layout must produce a Header area");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3: retrieve-marker that matches NO marker on the page contributes
+    // nothing — header still exists, but no spurious text appears.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn retrieve_marker_nested_with_no_matching_marker_contributes_nothing() {
+        let mut fo_tree = FoArena::new();
+        let root = fo_tree.add_node(FoNode::new(FoNodeData::Root));
+
+        let page_seq = fo_tree.add_node(FoNode::new(FoNodeData::PageSequence {
+            master_reference: "A4".to_string(),
+            format: "1".to_string(),
+            grouping_separator: None,
+            grouping_size: None,
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(root, page_seq)
+            .expect("test: should succeed");
+
+        let header = fo_tree.add_node(FoNode::new(FoNodeData::StaticContent {
+            flow_name: "xsl-region-before".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(page_seq, header)
+            .expect("test: should succeed");
+
+        let outer_block = fo_tree.add_node(FoNode::new(FoNodeData::Block {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(header, outer_block)
+            .expect("test: should succeed");
+
+        // retrieve-marker for a class that has NO matching fo:marker in the flow
+        let retrieve = fo_tree.add_node(FoNode::new(FoNodeData::RetrieveMarker {
+            retrieve_class_name: "nonexistent-class".to_string(),
+            retrieve_position: RetrievePosition::FirstStartingWithinPage,
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(outer_block, retrieve)
+            .expect("test: should succeed");
+
+        let flow = fo_tree.add_node(FoNode::new(FoNodeData::Flow {
+            flow_name: "xsl-region-body".to_string(),
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(page_seq, flow)
+            .expect("test: should succeed");
+
+        let body_block = fo_tree.add_node(FoNode::new(FoNodeData::Block {
+            properties: PropertyList::new(),
+        }));
+        fo_tree
+            .append_child(flow, body_block)
+            .expect("test: should succeed");
+        let body_text = fo_tree.add_node(FoNode::new(FoNodeData::Text("body content".to_string())));
+        fo_tree
+            .append_child(body_block, body_text)
+            .expect("test: should succeed");
+
+        let engine = make_engine();
+        let area_tree = engine
+            .layout(&fo_tree)
+            .expect("test: layout should succeed");
+
+        // The header should exist but contain no text of its own (no marker resolved)
+        let header_text_list = header_texts(&area_tree);
+        assert!(
+            header_text_list.is_empty(),
+            "unresolved nested retrieve-marker must contribute no text; \
+             got: {header_text_list:?}"
+        );
+
+        // The body text must not bleed into the header area check
+        assert!(
+            !has_text_in_area(&area_tree, "nonexistent-class"),
+            "retrieve-class-name string must not appear in any area"
+        );
     }
 }

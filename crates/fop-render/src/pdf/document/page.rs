@@ -77,27 +77,38 @@ impl PdfPage {
             .push(LinkAnnotation { rect, destination });
     }
 
-    /// Encode text for PDF output using UTF-16BE for CID fonts
-    /// Uses UTF-16BE hex strings WITHOUT BOM (matches Java FOP StandardCharsets.UTF_16BE)
-    fn encode_pdf_text(text: &str) -> String {
-        // For CID fonts (Type 0), we use UTF-16BE encoding
-        // Java FOP: text.getBytes(StandardCharsets.UTF_16BE) - NO BOM!
-        // BOM should only be in ToUnicode CMap, not in content streams
+    /// Encode text for PDF output using original glyph IDs as 2-byte CIDs.
+    ///
+    /// When a `char_to_orig_glyph` map is provided, each character is encoded as
+    /// its original TrueType GID (a u16, always fits in 4 hex digits).  This is
+    /// the correct CID per the module-level invariant in `fop_render::pdf::font`.
+    ///
+    /// When no map is provided (e.g. plain Helvetica text), the function falls
+    /// back to writing the Unicode code point directly, which works correctly for
+    /// BMP characters.  Callers that need astral-char support should always supply
+    /// the map via `add_text_with_font_tracked` (or equivalent).
+    ///
+    /// The returned string is a PDF hex string `<XXXX...>`, with no BOM.
+    fn encode_pdf_text_with_map(
+        text: &str,
+        char_to_orig_glyph: Option<&std::collections::HashMap<char, u16>>,
+    ) -> String {
         let mut result = String::from("<");
 
-        // Encode each character as UTF-16BE (without BOM)
         for c in text.chars() {
-            let code = c as u32;
-            if code <= 0xFFFF {
-                // BMP character (Basic Multilingual Plane)
-                result.push_str(&format!("{:04X}", code));
-            } else {
-                // Surrogate pair for non-BMP characters (above U+FFFF)
-                let code = code - 0x10000;
-                let high = 0xD800 + (code >> 10);
-                let low = 0xDC00 + (code & 0x3FF);
-                result.push_str(&format!("{:04X}{:04X}", high, low));
-            }
+            let cid: u32 = match char_to_orig_glyph.and_then(|m| m.get(&c).copied()) {
+                Some(orig_gid) => orig_gid as u32,
+                None => {
+                    // Fallback: Unicode code point (correct for BMP; astral chars
+                    // are not representable here, but this path is only hit for
+                    // non-tracked text which is limited to F1/Helvetica anyway).
+                    c as u32
+                }
+            };
+            // Always write exactly 4 hex digits (2-byte CID, big-endian).
+            // BMP characters and GIDs both fit; astral code points in the
+            // fallback path would exceed this, but that path is BMP-only.
+            result.push_str(&format!("{:04X}", cid & 0xFFFF));
         }
 
         result.push('>');
@@ -181,8 +192,10 @@ impl PdfPage {
         // Custom fonts are F2, F3, F4, etc. (F1 is reserved for Helvetica)
         let font_name = format!("F{}", font_index + 2);
 
-        // Encode text for PDF - use hex strings for Unicode characters
-        let encoded_text = Self::encode_pdf_text(text);
+        // Encode text using the Unicode code point as a fallback CID (BMP-safe).
+        // For astral characters, callers must use add_text_with_font_tracked so
+        // that the char_to_orig_glyph map is available for glyph-ID encoding.
+        let encoded_text = Self::encode_pdf_text_with_map(text, None);
 
         // Build optional Tc/Tw spacing operators
         let spacing_ops = build_spacing_ops(letter_spacing, word_spacing);
@@ -199,18 +212,25 @@ impl PdfPage {
         self.content.extend_from_slice(ops.as_bytes());
     }
 
-    /// Add text to the page using a custom embedded font and track character usage
+    /// Add text to the page using a custom embedded font and track character usage.
     ///
-    /// This is a convenience method that both adds the text and records character usage
-    /// for subsetting.
+    /// This is the primary method for Unicode text (including astral/non-BMP
+    /// characters).  It both records character usage for subsetting and encodes
+    /// the text using **original glyph IDs** as 2-byte CIDs — consistent with the
+    /// module-level CID invariant in `fop_render::pdf::font`.
+    ///
+    /// The glyph IDs are obtained from the original (non-subsetted) embedded font
+    /// by parsing its `font_data` via `ttf_parser`.  Astral characters such as
+    /// U+1F600 (😀) or U+20000 (𠀀) map to their original u16 GIDs which always
+    /// fit in the 2-byte CID space.
     ///
     /// # Arguments
-    /// * `text` - The text to display
+    /// * `text` - The text to display (any Unicode, including non-BMP)
     /// * `x` - X position
     /// * `y` - Y position
     /// * `font_size` - Font size
     /// * `font_index` - Index of the embedded font (from `embed_font`)
-    /// * `font_manager` - FontManager to record character usage
+    /// * `font_manager` - FontManager to record character usage and look up glyph IDs
     pub fn add_text_with_font_tracked(
         &mut self,
         text: &str,
@@ -220,11 +240,28 @@ impl PdfPage {
         font_index: usize,
         font_manager: &mut FontManager,
     ) {
-        // Record character usage for subsetting
+        // Record character usage for subsetting.
         font_manager.record_text(font_index, text);
 
-        // Add the text to the page
-        self.add_text_with_font(text, x, y, font_size, font_index);
+        // Encode text using original glyph IDs (CID = orig GID invariant).
+        // This correctly handles all Unicode scalars including astral characters.
+        let encoded_text = if let Some(font) = font_manager.get_font(font_index) {
+            font.encode_text_with_glyph_ids(text)
+        } else {
+            // Font not found; fall back to Unicode code point encoding.
+            Self::encode_pdf_text_with_map(text, None)
+        };
+
+        let font_name = format!("F{}", font_index + 2);
+        let ops = format!(
+            "BT\n/{} {} Tf\n{} {} Td\n{} Tj\nET\n",
+            font_name,
+            font_size.to_pt(),
+            x.to_pt(),
+            y.to_pt(),
+            encoded_text
+        );
+        self.content.extend_from_slice(ops.as_bytes());
     }
 
     /// Add background color to an area

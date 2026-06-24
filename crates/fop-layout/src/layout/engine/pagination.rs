@@ -24,8 +24,15 @@
 //! page left to right and starts a new page (reusing the same page-construction
 //! machinery, so static content repeats) once the last column is full.  Because
 //! the destination page is chosen *before* each block is emitted, multi-column
-//! blocks are born under the correct region-body and need no reparenting.  Full
-//! newspaper-style column *balancing* is intentionally out of scope.
+//! blocks are born under the correct region-body and need no reparenting.
+//!
+//! Full pages keep this sequential fill (they legitimately fill every column to
+//! capacity), but the **final** page is re-balanced newspaper-style so its
+//! columns end at roughly equal heights — the ordered blocks are partitioned
+//! into `column_count` contiguous groups minimising the tallest column (via a
+//! binary search over the target height with a greedy feasibility check) and the
+//! already-emitted block areas are repositioned in place.  See
+//! [`LayoutEngine::balance_multicolumn_page`].
 
 use crate::area::{Area, AreaId, AreaTree, AreaType, TraitSet};
 use crate::layout::PageNumberResolver;
@@ -38,15 +45,47 @@ use fop_core::{FoArena, FoNodeData, NodeId, PropertyId};
 use fop_types::{Length, Point, Rect, Result, Size};
 
 use super::markers::{collect_sequence_markers, DocumentMarkerState, PageMarkerView};
-use super::types::{FloatManager, MultiColumnLayout, PageRegionGeometry};
+use super::types::{FloatManager, MultiColumnLayout, PageContext, PageRegionGeometry};
 use super::LayoutEngine;
+
+use std::cell::RefCell;
 
 /// Owned, borrow-free description of everything needed to build each page of a
 /// single `fo:page-sequence`. Built once up front so the pagination loop never
 /// holds a borrow into the FO tree across the area-tree mutations.
+///
+/// # Per-page geometry
+///
+/// `geom` is the **pagination geometry**: the page/region rectangles used to
+/// drive flow overflow decisions (body height, the page breaker).  When the
+/// page-sequence's `master-reference` names a `fo:simple-page-master` it also
+/// *is* every page's geometry (the common, legacy case).
+///
+/// When the reference names a `fo:page-sequence-master`, `conditional` is
+/// `true` and each constructed page additionally resolves its *own*
+/// [`PageRegionGeometry`] from the conditional alternative that matches that
+/// page's [`PageContext`](super::types::PageContext) — used for the page rect,
+/// the region-body area rect and the static-content regions.  `geom` (resolved
+/// from the *first* page's selected master) still governs flow pagination, so
+/// the forward pass remains stable; this is exactly correct whenever the
+/// per-page masters share the first page's body geometry (see the module-level
+/// note on the differing-body-geometry residual).
 struct SequenceLayout {
-    /// Page/region geometry resolved from the page master.
+    /// Page/region geometry that drives flow pagination (body height + breaker).
     geom: PageRegionGeometry,
+    /// The page-sequence's `master-reference` (a simple-page-master *or* a
+    /// page-sequence-master name).
+    master_reference: String,
+    /// `true` when `master_reference` names a `fo:page-sequence-master`, so each
+    /// page must resolve its own geometry conditionally.
+    conditional: bool,
+    /// Per-page resolved geometry, pushed in lock-step with `page_ids` as each
+    /// page is constructed.  Index `i` is the geometry of `page_ids[i]`.  In the
+    /// non-conditional case every entry equals `geom`.  Wrapped in a `RefCell`
+    /// so the page-construction helpers (which only borrow `&seq`) can record
+    /// each page's geometry without threading an extra `&mut` parameter through
+    /// the whole pagination call graph.
+    page_geoms: RefCell<Vec<PageRegionGeometry>>,
     /// Traits applied to every page area (e.g. page background colour).
     page_traits: TraitSet,
     /// Traits applied to every region-body area (e.g. inherited text colour).
@@ -82,6 +121,27 @@ struct MultiColumnMetrics {
     break_after: BreakValue,
 }
 
+/// One block placed on the *current* multi-column page, recorded so the final
+/// page can be re-balanced ([`LayoutEngine::balance_multicolumn_page`]).
+///
+/// `occupied` is the exact vertical extent the block consumed in its column
+/// (`space-before` + laid-out content height + `space-after`), captured as the
+/// `column_y` delta around its emission.  `forces_column_boundary` is `true`
+/// when a mandatory column / page boundary precedes the block (a forced
+/// `break-before = column | page | even-page | odd-page`, or the implicit
+/// boundary created when a `break-after` ended the previous block); the balanced
+/// partition must start a new column at every such block so forced breaks remain
+/// honoured.
+#[derive(Debug, Clone, Copy)]
+struct BalanceEntry {
+    /// The emitted block area.
+    area_id: AreaId,
+    /// Vertical extent the block consumed in its column.
+    occupied: Length,
+    /// Whether a mandatory column boundary must precede this block.
+    forces_column_boundary: bool,
+}
+
 impl LayoutEngine {
     /// Lay out a whole `fo:page-sequence`, producing one or more page areas.
     ///
@@ -115,7 +175,28 @@ impl LayoutEngine {
             _ => return Ok(None),
         };
 
-        let geom = self.extract_page_region_geometry(fo_tree, &master_reference);
+        // Decide whether per-page conditional master selection is needed. When
+        // `master_reference` names a plain `fo:simple-page-master` this is
+        // `false` and the legacy single-geometry path is taken unchanged.
+        let conditional = self.is_page_sequence_master(fo_tree, &master_reference);
+
+        // The geometry that drives flow pagination (body height + page breaker).
+        // For a plain simple-page-master this is the page's only geometry.  For a
+        // page-sequence-master it is the *first* page's geometry: the conditional
+        // alternative that matches the first page (page index 0, the opening
+        // page number).  PASS 1 paginates against this stable body height; pages
+        // whose selected master shares this body geometry (the required case)
+        // render exactly correctly, and a differing body geometry is the
+        // recorded reflow residual (see the deferred sub-item).
+        let first_page_number = resolver.current_page();
+        let geom = if conditional {
+            let first_ctx = PageContext::for_page(first_page_number, true, false);
+            let first_master =
+                self.resolve_page_master_for_page(fo_tree, &master_reference, &first_ctx, false);
+            self.extract_page_region_geometry(fo_tree, &first_master)
+        } else {
+            self.extract_page_region_geometry(fo_tree, &master_reference)
+        };
 
         // Classify the page-sequence children into the static-content regions
         // and the principal flow.
@@ -155,6 +236,9 @@ impl LayoutEngine {
 
         let seq = SequenceLayout {
             geom,
+            master_reference,
+            conditional,
+            page_geoms: RefCell::new(Vec::new()),
             page_traits,
             body_traits,
             static_before,
@@ -163,13 +247,13 @@ impl LayoutEngine {
             static_end,
         };
 
-        // The page number the sequence opens on (the resolver is positioned on
-        // it by the previous sequence / its initial value of 1).  Pages are
-        // created sequentially incrementing the resolver by exactly one each,
-        // so page `i` of this sequence carries page number `first_page_number +
-        // i` — used below to re-establish the per-page number when the deferred
-        // static content (running headers/footers) is laid out.
-        let first_page_number = resolver.current_page();
+        // `first_page_number` is the page number the sequence opens on (the
+        // resolver is positioned on it by the previous sequence / its initial
+        // value of 1).  Pages are created sequentially incrementing the resolver
+        // by exactly one each, so page `i` of this sequence carries page number
+        // `first_page_number + i` — used below to re-establish the per-page
+        // number when the deferred static content (running headers/footers) is
+        // laid out.
 
         // PASS 1 — flow.  Build the pages and lay out the flow with
         // height-overflow pagination, recording each placed top-level flow item
@@ -179,7 +263,9 @@ impl LayoutEngine {
         // that page's flow, which are only known once the flow is placed.
         let mut page_ids: Vec<AreaId> = Vec::new();
         let mut placements: Vec<(AreaId, NodeId)> = Vec::new();
-        let (first_page_id, first_region_id) = self.new_page_with_regions(area_tree, &seq)?;
+        let first_geom = self.resolve_and_record_page_geom(fo_tree, &seq, first_page_number, false);
+        let (first_page_id, first_region_id) =
+            self.build_page_with_geom(area_tree, &seq, &first_geom)?;
         page_ids.push(first_page_id);
 
         // Register the page-sequence's own id against its first page.
@@ -200,9 +286,30 @@ impl LayoutEngine {
             )?;
         }
 
-        // Place collected footnotes at the bottom of every page's body region.
-        for page_id in &page_ids {
-            self.place_footnotes_for_page(area_tree, *page_id, seq.geom.body_rect)?;
+        // `last`-conditional fix-up.  The total page count is now known, so the
+        // final page's `last` condition is resolvable.  Re-resolve its master
+        // with `is_last = true`; if that selects a *different* geometry whose
+        // body matches the forward-pass body (so the already-placed flow stays
+        // valid), adopt it for the final page (page rect + region-body rect +
+        // recorded geometry, which the static-content/footnote passes consult).
+        // A `last` master whose **body geometry differs** would require reflowing
+        // the final page's flow into the new body box — out of safe scope this
+        // session and left unapplied rather than emitting inconsistent geometry
+        // (see the deferred sub-item in the report).
+        if seq.conditional && !page_ids.is_empty() {
+            self.apply_last_page_master(fo_tree, area_tree, &seq, &page_ids, first_page_number)?;
+        }
+
+        // Place collected footnotes at the bottom of every page's body region,
+        // using that page's resolved geometry.
+        for (page_idx, page_id) in page_ids.iter().enumerate() {
+            let body_rect = seq
+                .page_geoms
+                .borrow()
+                .get(page_idx)
+                .map(|g| g.body_rect)
+                .unwrap_or(seq.geom.body_rect);
+            self.place_footnotes_for_page(area_tree, *page_id, body_rect)?;
         }
 
         // Build the page-accurate marker context from the finished flow.
@@ -222,7 +329,15 @@ impl LayoutEngine {
         for (page_idx, page_id) in page_ids.iter().enumerate() {
             resolver.set_current_page(first_page_number + page_idx);
             let view = PageMarkerView::new(&seq_markers, page_idx);
-            self.layout_page_static_content(fo_tree, area_tree, &seq, *page_id, resolver, &view)?;
+            let geom = seq
+                .page_geoms
+                .borrow()
+                .get(page_idx)
+                .copied()
+                .unwrap_or(seq.geom);
+            self.layout_page_static_content(
+                fo_tree, area_tree, &seq, &geom, *page_id, resolver, &view,
+            )?;
         }
 
         // Carry the markers in effect at the sequence end into the next
@@ -235,6 +350,89 @@ impl LayoutEngine {
         Ok(Some(first_page_id))
     }
 
+    /// Apply the `last`-page conditional master to the final page of a
+    /// conditional sequence, now that the total page count is known.
+    ///
+    /// Re-resolves the final page's geometry with `is_last = true` (and the page
+    /// being blank only if it already was — the last page being a blank
+    /// even/odd-page intermediate is preserved).  When the re-resolved geometry
+    /// differs from the forward-pass geometry:
+    ///
+    /// * **Body geometry unchanged** — the page rect and its region-body area
+    ///   rect are updated to the new geometry and the recorded per-page geometry
+    ///   is overwritten, so the subsequent static-content / footnote passes use
+    ///   the `last` master's regions.  The already-placed flow stays valid
+    ///   because the body box it filled is identical.
+    /// * **Body geometry differs** — applying it would require reflowing the
+    ///   final page's flow into a different body box.  That reflow is out of safe
+    ///   scope this session, so the new geometry is **not** applied (the
+    ///   forward-pass geometry is kept) rather than emitting a page whose body
+    ///   content no longer matches its region — an honest, recorded residual.
+    fn apply_last_page_master(
+        &self,
+        fo_tree: &FoArena,
+        area_tree: &mut AreaTree,
+        seq: &SequenceLayout,
+        page_ids: &[AreaId],
+        first_page_number: usize,
+    ) -> Result<()> {
+        let last_idx = page_ids.len() - 1;
+        let page_id = page_ids[last_idx];
+        let forward_geom = match seq.page_geoms.borrow().get(last_idx).copied() {
+            Some(g) => g,
+            None => return Ok(()),
+        };
+
+        // A single-page sequence's only page is simultaneously first and last.
+        let is_first = last_idx == 0;
+        let page_number = first_page_number + last_idx;
+        let ctx = PageContext::for_page(page_number, is_first, true);
+        // The forward pass never marks pages blank here (blank intermediates are
+        // never the trailing content page in practice); resolve as not-blank.
+        let last_master =
+            self.resolve_page_master_for_page(fo_tree, &seq.master_reference, &ctx, false);
+        let last_geom = self.extract_page_region_geometry(fo_tree, &last_master);
+
+        // Nothing to do when the `last` condition selected an identical
+        // geometry (same master, or a different master with the same regions).
+        if geometries_equal(&last_geom, &forward_geom) {
+            return Ok(());
+        }
+
+        // Only safe to adopt when the body box is identical (the flow was
+        // paginated against it); otherwise keep the forward geometry.
+        if last_geom.body_rect != forward_geom.body_rect {
+            return Ok(());
+        }
+
+        // Adopt the `last` geometry: overwrite the recorded entry, resize the
+        // page area and its region-body area.
+        if let Some(slot) = seq.page_geoms.borrow_mut().get_mut(last_idx) {
+            *slot = last_geom;
+        }
+        if let Some(page_node) = area_tree.get_mut(page_id) {
+            page_node.area.geometry = Rect::from_point_size(
+                Point::ZERO,
+                Size::new(last_geom.page_width, last_geom.page_height),
+            );
+        }
+        // The region-body is the page's `Region`/`Column` child; resize it.
+        for child_id in area_tree.children(page_id) {
+            let is_body = area_tree
+                .get(child_id)
+                .map(|n| matches!(n.area.area_type, AreaType::Region | AreaType::Column))
+                .unwrap_or(false);
+            if is_body {
+                if let Some(node) = area_tree.get_mut(child_id) {
+                    node.area.geometry = last_geom.body_rect;
+                }
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Lay out a single page's repeated static-content regions (header / footer
     /// / start & end sidebars), resolving each `fo:retrieve-marker` against
     /// `view` (this page's marker context), then restore the canonical page
@@ -245,16 +443,17 @@ impl LayoutEngine {
     /// known once that page's flow has been placed.  The reorder compensates for
     /// the append-only area tree so the static areas precede the region-body
     /// exactly as if they had been built first.
+    #[allow(clippy::too_many_arguments)]
     fn layout_page_static_content(
         &self,
         fo_tree: &FoArena,
         area_tree: &mut AreaTree,
         seq: &SequenceLayout,
+        geom: &PageRegionGeometry,
         page_id: AreaId,
         resolver: &mut PageNumberResolver,
         view: &PageMarkerView,
     ) -> Result<()> {
-        let geom = &seq.geom;
         if let Some(header_id) = seq.static_before {
             self.layout_static_content_in_rect(
                 fo_tree,
@@ -308,19 +507,55 @@ impl LayoutEngine {
         Ok(())
     }
 
-    /// Create a new top-level page area and its (empty) region-body.
+    /// Resolve the [`PageRegionGeometry`] a page should use given its
+    /// construction context, **and record it** in `seq.page_geoms` so the
+    /// static-content / footnote passes (and the `last` fix-up) can later look
+    /// it up by page index.
+    ///
+    /// * Non-conditional sequences (plain simple-page-master) always use
+    ///   `seq.geom`.
+    /// * Conditional sequences resolve the concrete simple-page-master from the
+    ///   page's [`PageContext`]: `is_first` is true only for sequence index 0,
+    ///   `odd`/`even` follow the absolute `page_number`, and `is_blank` marks
+    ///   the blank intermediate pages inserted for `even-page`/`odd-page` forced
+    ///   breaks.  `last` is **not** resolvable here (the total page count is
+    ///   unknown during the forward pass), so `is_last` is always `false`; the
+    ///   final page's `last`-conditional is applied by the post-pass fix-up in
+    ///   [`Self::layout_page_sequence`].
+    fn resolve_and_record_page_geom(
+        &self,
+        fo_tree: &FoArena,
+        seq: &SequenceLayout,
+        page_number: usize,
+        is_blank: bool,
+    ) -> PageRegionGeometry {
+        let geom = if seq.conditional {
+            let seq_index = seq.page_geoms.borrow().len();
+            let is_first = seq_index == 0;
+            let ctx = PageContext::for_page(page_number, is_first, false);
+            let master =
+                self.resolve_page_master_for_page(fo_tree, &seq.master_reference, &ctx, is_blank);
+            self.extract_page_region_geometry(fo_tree, &master)
+        } else {
+            seq.geom
+        };
+        seq.page_geoms.borrow_mut().push(geom);
+        geom
+    }
+
+    /// Create a new top-level page area and its (empty) region-body, using the
+    /// supplied per-page `geom`.
     ///
     /// Returns `(page_id, region_body_id)`. The repeated static content
     /// (headers / footers / sidebars) is **not** built here: it is laid out in
     /// a second pass once the flow's per-page markers are known (see
     /// [`Self::layout_page_static_content`]).
-    fn new_page_with_regions(
+    fn build_page_with_geom(
         &self,
         area_tree: &mut AreaTree,
         seq: &SequenceLayout,
+        geom: &PageRegionGeometry,
     ) -> Result<(AreaId, AreaId)> {
-        let geom = &seq.geom;
-
         let page_rect =
             Rect::from_point_size(Point::ZERO, Size::new(geom.page_width, geom.page_height));
         let page_area = Area::new(AreaType::Page, page_rect).with_traits(seq.page_traits.clone());
@@ -438,6 +673,7 @@ impl LayoutEngine {
                 && (!page_blocks.is_empty() || current_y > Length::ZERO)
             {
                 current_region_id = self.start_new_page_for_break(
+                    fo_tree,
                     area_tree,
                     seq,
                     page_ids,
@@ -478,30 +714,29 @@ impl LayoutEngine {
                 };
                 let block_bottom = block_y + block_h;
 
-                // Overflow when the block's bottom exceeds the body box and the
-                // page already holds earlier content (a block can never overflow
-                // off an empty page — it would just clip, see block-splitting
-                // deferral in the report).
-                if block_bottom > body_height && current_y > Length::ZERO {
-                    // Determine the keep-group: the trailing run of blocks that
-                    // must travel together to the next page.
-                    let group_start = keep_group_start(&breaker, area_tree, &page_blocks);
-                    // If the whole page is one glued group we cannot honour the
-                    // keep without overflowing; fall back to moving the last
-                    // block alone so layout still makes progress.
-                    let effective_start = if group_start == 0 && page_blocks.len() > 1 {
-                        page_blocks.len() - 1
-                    } else {
-                        group_start
-                    };
-
-                    let group: Vec<AreaId> = page_blocks[effective_start..].to_vec();
-
-                    current_region_id = self.start_new_page(area_tree, seq, page_ids, resolver)?;
+                // Overflow when the block's bottom exceeds the body box.  Unlike
+                // the previous deferral, a block that overflows even an *empty*
+                // region-body (`current_y == 0`) is no longer clipped: it is
+                // split at a line-box boundary (widow/orphan-governed) so the
+                // head fills the page and the tail continues onto the next.
+                if block_bottom > body_height {
+                    let (next_region, next_y, next_blocks) = self.place_overflowing_block(
+                        fo_tree,
+                        area_tree,
+                        seq,
+                        page_ids,
+                        resolver,
+                        &breaker,
+                        block_id,
+                        block_y,
+                        body_height,
+                        current_y == Length::ZERO,
+                        std::mem::take(&mut page_blocks),
+                    )?;
+                    current_region_id = next_region;
+                    current_y = next_y;
+                    page_blocks = next_blocks;
                     float_manager.clear();
-
-                    current_y = migrate_blocks(area_tree, &group, current_region_id)?;
-                    page_blocks = group;
                 } else {
                     current_y = block_bottom;
                 }
@@ -509,8 +744,14 @@ impl LayoutEngine {
 
             // Forced break-after: subsequent content starts on a fresh page.
             if break_after.forces_page_break() {
-                current_region_id =
-                    self.start_new_page_for_break(area_tree, seq, page_ids, resolver, break_after)?;
+                current_region_id = self.start_new_page_for_break(
+                    fo_tree,
+                    area_tree,
+                    seq,
+                    page_ids,
+                    resolver,
+                    break_after,
+                )?;
                 page_blocks.clear();
                 current_y = Length::ZERO;
                 float_manager.clear();
@@ -554,6 +795,17 @@ impl LayoutEngine {
             .with_max_height(body_rect.height);
         let mut current_region_id = first_region_id;
 
+        // Blocks placed on the page currently being filled, recorded so the
+        // *final* page can be re-balanced once the flow ends (see
+        // [`Self::balance_multicolumn_page`]).  Whenever a new page is started
+        // the just-completed page was filled to capacity and is left on the
+        // sequential path, so the accumulator is reset rather than balanced.
+        let mut page_entries: Vec<BalanceEntry> = Vec::new();
+        // `true` once the next block must start a fresh column (a forced
+        // `break-after = column` ran, leaving the cursor mid-column with a
+        // mandatory boundary ahead of the next block).
+        let mut pending_column_boundary = false;
+
         for &child_id in children {
             // Non-block flow children (e.g. floats/tables) have no column
             // flow-control; emit them in place (the placement primitive returns
@@ -575,12 +827,19 @@ impl LayoutEngine {
                 }
             };
 
+            // Track whether this block is preceded by a mandatory column
+            // boundary, so the balanced partition can respect it.
+            let mut forces_boundary = pending_column_boundary;
+            pending_column_boundary = false;
+
             // Forced break-before. A page break starts a fresh page (only when the
             // current page already holds content); a column break advances to the
             // next column (starting a new page when the last column is reached).
+            let pages_before = page_ids.len();
             if metrics.break_before.forces_page_break() && multicolumn_page_has_content(&multi_col)
             {
                 current_region_id = self.start_new_page_for_break(
+                    fo_tree,
                     area_tree,
                     seq,
                     page_ids,
@@ -592,6 +851,7 @@ impl LayoutEngine {
                 && multi_col.column_y > Length::ZERO
             {
                 current_region_id = self.advance_multicolumn(
+                    fo_tree,
                     area_tree,
                     seq,
                     page_ids,
@@ -599,6 +859,7 @@ impl LayoutEngine {
                     &mut multi_col,
                     current_region_id,
                 )?;
+                forces_boundary = true;
             }
 
             // Apply space-before, then decide the column fit.  This mirrors the
@@ -608,6 +869,7 @@ impl LayoutEngine {
             let total_height = metrics.space_before + metrics.line_height + metrics.space_after;
             if multi_col.is_column_filled(total_height) {
                 current_region_id = self.advance_multicolumn(
+                    fo_tree,
                     area_tree,
                     seq,
                     page_ids,
@@ -617,7 +879,17 @@ impl LayoutEngine {
                 )?;
             }
 
-            // Place the block in the current column of the current page.
+            // A new page was started while placing this block: the previous page
+            // was filled to capacity, so it stays sequential — discard its
+            // accumulated entries (the freshly started page begins empty).
+            if page_ids.len() > pages_before {
+                page_entries.clear();
+                forces_boundary = false;
+            }
+
+            // Place the block in the current column of the current page, capturing
+            // the exact vertical extent it consumes (for the balance partition).
+            let column_y_before = multi_col.column_y - metrics.space_before;
             if let Some(area_id) = self.emit_multicolumn_block(
                 fo_tree,
                 child_id,
@@ -627,15 +899,23 @@ impl LayoutEngine {
                 resolver,
             )? {
                 placements.push((area_id, child_id));
+                // Apply space-after, then record what the block consumed.
+                multi_col.allocate(metrics.space_after);
+                let occupied = (multi_col.column_y - column_y_before).max(Length::ZERO);
+                page_entries.push(BalanceEntry {
+                    area_id,
+                    occupied,
+                    forces_column_boundary: forces_boundary,
+                });
+            } else {
+                multi_col.allocate(metrics.space_after);
             }
-
-            // Apply space-after.
-            multi_col.allocate(metrics.space_after);
 
             // Forced break-after: a page break starts a fresh page for the next
             // block; a column break advances to the next column.
             if metrics.break_after.forces_page_break() {
                 current_region_id = self.start_new_page_for_break(
+                    fo_tree,
                     area_tree,
                     seq,
                     page_ids,
@@ -643,8 +923,10 @@ impl LayoutEngine {
                     metrics.break_after,
                 )?;
                 multi_col.reset();
+                page_entries.clear();
             } else if matches!(metrics.break_after, BreakValue::Column) {
                 current_region_id = self.advance_multicolumn(
+                    fo_tree,
                     area_tree,
                     seq,
                     page_ids,
@@ -652,18 +934,123 @@ impl LayoutEngine {
                     &mut multi_col,
                     current_region_id,
                 )?;
+                pending_column_boundary = true;
+            }
+        }
+
+        // The flow has ended; `page_entries` describes the final page.  Re-balance
+        // its columns so they end at roughly equal heights (newspaper style),
+        // honouring any mandatory column boundaries recorded along the way.  Full
+        // intermediate pages were never accumulated, so they keep the sequential
+        // fill.
+        self.balance_multicolumn_page(area_tree, &page_entries, column_count, &multi_col)?;
+
+        Ok(())
+    }
+
+    /// Re-balance the columns of the final multi-column page so they end at
+    /// approximately equal heights (the newspaper-style balanced-columns
+    /// objective), repositioning the already-emitted block areas in place.
+    ///
+    /// # Algorithm
+    ///
+    /// The ordered `entries` are partitioned into at most `column_count`
+    /// *contiguous* groups (a block can never move to an earlier column than a
+    /// preceding block — document order is preserved both within and across
+    /// columns).  The partition minimises the **maximum column height**:
+    ///
+    /// 1. Binary-search the target column height `target` over the closed range
+    ///    `[lo, hi]`, where `lo` is the tallest single block (no column can be
+    ///    shorter than its tallest member) and `hi` is the total height of all
+    ///    blocks (one column holds everything, always feasible height-wise).
+    /// 2. For a candidate `target`, a greedy feasibility walk
+    ///    ([`balance_columns_needed`]) packs blocks into columns, opening a new
+    ///    column whenever the next block would overflow `target` **or** carries a
+    ///    mandatory `forces_column_boundary`.  The candidate is feasible when no
+    ///    more than `column_count` columns are needed.
+    /// 3. The smallest feasible `target` yields the balanced partition.  A single
+    ///    block taller than `target` simply occupies its own column and sets the
+    ///    realised maximum (blocks are never split across columns here — that is a
+    ///    follow-up).
+    ///
+    /// # Edge cases
+    ///
+    /// * Fewer blocks than columns ⇒ trailing columns stay empty (each block can
+    ///   take its own column), which still minimises the maximum.
+    /// * A mandatory boundary forces a column break regardless of `target`; if the
+    ///   mandatory boundaries alone demand more than `column_count` columns the
+    ///   greedy walk reports infeasibility for every `target`, so the search
+    ///   clamps to `hi` and the partition degrades gracefully (later columns
+    ///   simply overflow, matching the un-balanced fallback).
+    /// * An empty page (no entries) is a no-op.
+    fn balance_multicolumn_page(
+        &self,
+        area_tree: &mut AreaTree,
+        entries: &[BalanceEntry],
+        column_count: i32,
+        multi_col: &MultiColumnLayout,
+    ) -> Result<()> {
+        if entries.is_empty() || column_count <= 1 {
+            return Ok(());
+        }
+
+        let columns = balance_partition(entries, column_count);
+
+        // Re-place each block at the origin of its assigned column, stacking the
+        // blocks of a column from the body top while preserving their inter-block
+        // spacing (the gap each block carried over its laid-out content height).
+        let stride = multi_col.column_width() + multi_col.column_gap;
+        for (column_index, group) in columns.iter().enumerate() {
+            // `MultiColumnLayout::current_column_x` multiplies the column stride
+            // by the (i32) column index; replicate it for the balanced index.
+            let column_x = stride * column_index as i32;
+
+            let mut column_y = Length::ZERO;
+            for entry in group {
+                let (old_x, height) = match area_tree.get(entry.area_id) {
+                    Some(node) => (node.area.geometry.x, node.area.height()),
+                    None => continue,
+                };
+                // The block's start-indent is the horizontal offset of its origin
+                // beyond its *original* column origin; preserve it when moving to
+                // the new column so indented blocks stay indented.
+                let original_column_x = Self::nearest_column_origin(multi_col, old_x);
+                let start_indent = (old_x - original_column_x).max(Length::ZERO);
+
+                if let Some(node) = area_tree.get_mut(entry.area_id) {
+                    node.area.geometry.x = column_x + start_indent;
+                    node.area.geometry.y = column_y;
+                }
+                // Stack the next block below this one; `occupied` folds in the
+                // block's leading/trailing space, and never under-counts the
+                // laid-out content height.
+                column_y += entry.occupied.max(height);
             }
         }
 
         Ok(())
     }
 
+    /// The origin (`x`) of the column whose span contains `x`, used to recover a
+    /// block's start-indent independent of which column it was originally placed
+    /// in.
+    fn nearest_column_origin(multi_col: &MultiColumnLayout, x: Length) -> Length {
+        let stride = multi_col.column_width() + multi_col.column_gap;
+        if stride <= Length::ZERO {
+            return Length::ZERO;
+        }
+        let index = (x.to_pt() / stride.to_pt()).floor().max(0.0) as i32;
+        stride * index
+    }
+
     /// Advance the multi-column cursor to the next column, or — when the current
     /// column is the last one on the page — start a new page (repeating static
     /// content) and reset to its first column.  Returns the region-body the flow
     /// should continue placing blocks into.
+    #[allow(clippy::too_many_arguments)]
     fn advance_multicolumn(
         &self,
+        fo_tree: &FoArena,
         area_tree: &mut AreaTree,
         seq: &SequenceLayout,
         page_ids: &mut Vec<AreaId>,
@@ -676,7 +1063,7 @@ impl LayoutEngine {
             Ok(current_region_id)
         } else {
             // The last column was full: start a new page and reset to column one.
-            let new_region = self.start_new_page(area_tree, seq, page_ids, resolver)?;
+            let new_region = self.start_new_page(fo_tree, area_tree, seq, page_ids, resolver)?;
             multi_col.reset();
             Ok(new_region)
         }
@@ -715,15 +1102,142 @@ impl LayoutEngine {
 
     /// Increment the page counter, build the next page (empty region-body, no
     /// static content yet), record it, and return its region-body id.
+    /// Handle a block whose bottom edge overflows the region-body, splitting it
+    /// across the page boundary when widow/orphan control permits and otherwise
+    /// migrating the keep-group whole (the legacy behaviour).
+    ///
+    /// `block_y` is the overflowing block's region-relative top; `body_height`
+    /// the region-body content height; `empty_page` is `true` when the block is
+    /// the first content of the current (otherwise empty) page.  `page_blocks`
+    /// is taken by value (the blocks placed on the current page) and the updated
+    /// list for the *new* current page is returned.
+    ///
+    /// Returns `(new_region_id, new_current_y, new_page_blocks)`.
+    ///
+    /// # Splitting loop
+    ///
+    /// 1. Attempt to split the block at `body_height - block_y` of available
+    ///    head space ([`PageBreaker::split_area`]).  When it splits, the head
+    ///    stays on the current page; a fresh page is started and the
+    ///    continuation is placed at its body top.  The continuation may itself
+    ///    overflow, so the loop repeats — a single block can span 3+ pages.
+    /// 2. When the block refuses to split (keep-together, too few lines for
+    ///    widows+orphans, or a non-empty page with no fitting head line), fall
+    ///    back to migrating the trailing keep-group to a new page, exactly as
+    ///    before.  A continuation produced by step 1 that still cannot split is
+    ///    placed on its own fresh page (it is then the sole block, so migrating
+    ///    it whole always makes progress).
+    #[allow(clippy::too_many_arguments)]
+    fn place_overflowing_block(
+        &self,
+        fo_tree: &FoArena,
+        area_tree: &mut AreaTree,
+        seq: &SequenceLayout,
+        page_ids: &mut Vec<AreaId>,
+        resolver: &mut PageNumberResolver,
+        breaker: &PageBreaker,
+        block_id: AreaId,
+        block_y: Length,
+        body_height: Length,
+        empty_page: bool,
+        page_blocks: Vec<AreaId>,
+        // returns the new page state
+    ) -> Result<(AreaId, Length, Vec<AreaId>)> {
+        // The head space available to the overflowing block is from its top edge
+        // down to the body bottom.
+        let available = (body_height - block_y).max(Length::ZERO);
+
+        if let Some(continuation_id) =
+            breaker.split_area(area_tree, block_id, available, empty_page)?
+        {
+            // The head stayed on the current page; start a new page for the
+            // continuation and keep splitting it until the tail fits.
+            let mut region_id = self.start_new_page(fo_tree, area_tree, seq, page_ids, resolver)?;
+            let mut cont_id = continuation_id;
+            loop {
+                // Place the continuation flush at the new page's body top.
+                area_tree
+                    .reparent(cont_id, region_id)
+                    .map_err(fop_types::FopError::Generic)?;
+                if let Some(node) = area_tree.get_mut(cont_id) {
+                    node.area.geometry.y = Length::ZERO;
+                }
+                let cont_h = area_tree
+                    .get(cont_id)
+                    .map(|n| n.area.height())
+                    .unwrap_or(Length::ZERO);
+
+                if cont_h <= body_height {
+                    // The tail fits on this page; it becomes the page's first
+                    // (and so far only) block.
+                    return Ok((region_id, cont_h, vec![cont_id]));
+                }
+
+                // The continuation still overflows an empty page: split again.
+                match breaker.split_area(area_tree, cont_id, body_height, true)? {
+                    Some(next_cont) => {
+                        region_id =
+                            self.start_new_page(fo_tree, area_tree, seq, page_ids, resolver)?;
+                        cont_id = next_cont;
+                    }
+                    None => {
+                        // Cannot split further (e.g. fewer than widows+orphans
+                        // tail lines, or keep-together): leave it whole on this
+                        // page even though it overflows — it is the sole block,
+                        // so this is the best achievable placement.
+                        return Ok((region_id, cont_h, vec![cont_id]));
+                    }
+                }
+            }
+        }
+
+        // The block did not split — migrate its trailing keep-group whole, as
+        // the pre-splitting implementation did.  `block_id` is already the last
+        // entry of `page_blocks` (pushed by the caller before overflow handling).
+        debug_assert_eq!(page_blocks.last().copied(), Some(block_id));
+        let group_start = keep_group_start(breaker, area_tree, &page_blocks);
+        // If the whole page is one glued group we cannot honour the keep without
+        // overflowing; fall back to moving the last block alone so layout still
+        // makes progress.
+        let effective_start = if group_start == 0 && page_blocks.len() > 1 {
+            page_blocks.len() - 1
+        } else {
+            group_start
+        };
+        let group: Vec<AreaId> = page_blocks[effective_start..].to_vec();
+
+        let region_id = self.start_new_page(fo_tree, area_tree, seq, page_ids, resolver)?;
+        let new_y = migrate_blocks(area_tree, &group, region_id)?;
+        Ok((region_id, new_y, group))
+    }
+
     fn start_new_page(
         &self,
+        fo_tree: &FoArena,
         area_tree: &mut AreaTree,
         seq: &SequenceLayout,
         page_ids: &mut Vec<AreaId>,
         resolver: &mut PageNumberResolver,
     ) -> Result<AreaId> {
+        self.start_new_page_inner(fo_tree, area_tree, seq, page_ids, resolver, false)
+    }
+
+    /// `start_new_page` with an explicit `is_blank` flag for the geometry
+    /// resolver (the blank intermediates inserted by even/odd-page forced breaks
+    /// must be matched by `blank-or-not-blank="blank"` conditionals).
+    fn start_new_page_inner(
+        &self,
+        fo_tree: &FoArena,
+        area_tree: &mut AreaTree,
+        seq: &SequenceLayout,
+        page_ids: &mut Vec<AreaId>,
+        resolver: &mut PageNumberResolver,
+        is_blank: bool,
+    ) -> Result<AreaId> {
         resolver.set_current_page(resolver.current_page() + 1);
-        let (page_id, region_id) = self.new_page_with_regions(area_tree, seq)?;
+        let geom =
+            self.resolve_and_record_page_geom(fo_tree, seq, resolver.current_page(), is_blank);
+        let (page_id, region_id) = self.build_page_with_geom(area_tree, seq, &geom)?;
         page_ids.push(page_id);
         Ok(region_id)
     }
@@ -733,21 +1247,26 @@ impl LayoutEngine {
     /// even-page | odd-page`) that the freshly created page does not satisfy.
     fn start_new_page_for_break(
         &self,
+        fo_tree: &FoArena,
         area_tree: &mut AreaTree,
         seq: &SequenceLayout,
         page_ids: &mut Vec<AreaId>,
         resolver: &mut PageNumberResolver,
         break_value: BreakValue,
     ) -> Result<AreaId> {
-        let mut region_id = self.start_new_page(area_tree, seq, page_ids, resolver)?;
+        // Decide up front whether a blank intermediate page is needed: the
+        // freshly created page would carry parity `current_page + 1`; if that
+        // mismatches the break's required parity it becomes the blank page and
+        // content lands on the following (correct-parity) page.
+        let next_is_odd = (resolver.current_page() + 1) % 2 == 1;
+        let needs_extra = (break_value.requires_even_page() && next_is_odd)
+            || (break_value.requires_odd_page() && !next_is_odd);
 
-        let current_is_odd = resolver.current_page() % 2 == 1;
-        let needs_extra = (break_value.requires_even_page() && current_is_odd)
-            || (break_value.requires_odd_page() && !current_is_odd);
+        // The first created page is blank exactly when an extra page is needed.
+        let mut region_id =
+            self.start_new_page_inner(fo_tree, area_tree, seq, page_ids, resolver, needs_extra)?;
         if needs_extra {
-            // The just-created page becomes a blank intermediate; content lands
-            // on the following (correct-parity) page.
-            region_id = self.start_new_page(area_tree, seq, page_ids, resolver)?;
+            region_id = self.start_new_page(fo_tree, area_tree, seq, page_ids, resolver)?;
         }
 
         Ok(region_id)
@@ -767,6 +1286,20 @@ impl LayoutEngine {
             [margin_top, margin_right, margin_bottom, margin_left],
         )
     }
+}
+
+/// Whether two [`PageRegionGeometry`] values describe identical page/region
+/// rectangles.  Used by the `last`-conditional fix-up to decide whether the
+/// final page's geometry actually changed (and so whether any area resizing is
+/// needed at all).
+fn geometries_equal(a: &PageRegionGeometry, b: &PageRegionGeometry) -> bool {
+    a.page_width == b.page_width
+        && a.page_height == b.page_height
+        && a.before_rect == b.before_rect
+        && a.after_rect == b.after_rect
+        && a.start_rect == b.start_rect
+        && a.end_rect == b.end_rect
+        && a.body_rect == b.body_rect
 }
 
 /// Whether the current page already holds multi-column content.  A forced page
@@ -807,6 +1340,99 @@ fn keep_group_start(breaker: &PageBreaker, area_tree: &AreaTree, blocks: &[AreaI
         start -= 1;
     }
     start
+}
+
+/// Partition the ordered `entries` into at most `column_count` contiguous groups
+/// (one per column) minimising the maximum column height, honouring mandatory
+/// column boundaries.  Returns exactly `column_count` groups (trailing ones may
+/// be empty when there are fewer blocks than columns).
+///
+/// See [`LayoutEngine::balance_multicolumn_page`] for the full algorithm; this
+/// is the pure partition step (binary search over the target height with a
+/// greedy feasibility check).
+fn balance_partition(entries: &[BalanceEntry], column_count: i32) -> Vec<Vec<BalanceEntry>> {
+    let columns = column_count.max(1) as usize;
+    let mut groups: Vec<Vec<BalanceEntry>> = vec![Vec::new(); columns];
+    if entries.is_empty() {
+        return groups;
+    }
+
+    // Search bounds: `hi` (one column holds everything) is always feasible for
+    // the *height* constraint; `lo` is the tallest single block, below which no
+    // partition can pack any column.  Lengths are integer EMU under the hood, so
+    // a unit-step binary search terminates exactly.
+    let total: Length = entries
+        .iter()
+        .fold(Length::ZERO, |acc, e| acc + e.occupied.max(Length::ZERO));
+    let max_block: Length = entries
+        .iter()
+        .fold(Length::ZERO, |acc, e| acc.max(e.occupied.max(Length::ZERO)));
+
+    // Lengths are stored as integer millipoints, so the unit-step binary search
+    // over `[lo, hi]` terminates exactly.
+    let mut lo = max_block.millipoints();
+    let mut hi = total.millipoints().max(lo);
+
+    // If even `hi` is infeasible (mandatory boundaries alone demand more than
+    // `column_count` columns) the partition cannot satisfy the constraint; fall
+    // back to the greedy packing at `hi`, which simply lets later columns
+    // overflow — graceful degradation matching the un-balanced behaviour.
+    let feasible_at = |target_milli: i32| -> bool {
+        balance_columns_needed(entries, Length::from_millipoints(target_milli)) <= columns
+    };
+
+    if feasible_at(hi) {
+        // Binary-search the smallest feasible target in [lo, hi].
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if feasible_at(mid) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+    }
+    let target = Length::from_millipoints(hi);
+
+    // Re-run the greedy packing at the chosen target to materialise the groups.
+    let mut column_index = 0usize;
+    let mut column_height = Length::ZERO;
+    for (i, entry) in entries.iter().enumerate() {
+        let height = entry.occupied.max(Length::ZERO);
+        let must_break = entry.forces_column_boundary && i > 0;
+        let would_overflow = column_height + height > target && column_height > Length::ZERO;
+        if (must_break || would_overflow) && column_index + 1 < columns {
+            column_index += 1;
+            column_height = Length::ZERO;
+        }
+        groups[column_index].push(*entry);
+        column_height += height;
+    }
+
+    groups
+}
+
+/// Number of columns the greedy packing needs to keep every column at or below
+/// `target` height (a new column opens when the next block would overflow
+/// `target` or carries a mandatory boundary).  A single block taller than
+/// `target` occupies its own column without forcing infeasibility on its own.
+fn balance_columns_needed(entries: &[BalanceEntry], target: Length) -> usize {
+    if entries.is_empty() {
+        return 0;
+    }
+    let mut columns = 1usize;
+    let mut column_height = Length::ZERO;
+    for (i, entry) in entries.iter().enumerate() {
+        let height = entry.occupied.max(Length::ZERO);
+        let must_break = entry.forces_column_boundary && i > 0;
+        let would_overflow = column_height + height > target && column_height > Length::ZERO;
+        if must_break || would_overflow {
+            columns += 1;
+            column_height = Length::ZERO;
+        }
+        column_height += height;
+    }
+    columns
 }
 
 /// Reparent each block in `group` (in order) under `new_region`, restacking
@@ -850,1131 +1476,5 @@ fn migrate_blocks(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::area::AreaType;
-    use fop_core::{FoNode, PropertyList, PropertyValue};
-    use std::borrow::Cow;
-
-    /// Specification for one flow block: its (line-)height in points and an
-    /// optional forced `break-before` value (e.g. `"page"`).
-    struct BlockSpec {
-        height_pt: f64,
-        break_before: Option<&'static str>,
-    }
-
-    fn block(height_pt: f64) -> BlockSpec {
-        BlockSpec {
-            height_pt,
-            break_before: None,
-        }
-    }
-
-    fn block_break_before(height_pt: f64, value: &'static str) -> BlockSpec {
-        BlockSpec {
-            height_pt,
-            break_before: Some(value),
-        }
-    }
-
-    /// Build a single-page-sequence document with an explicit simple-page-master
-    /// so the region geometry is fully deterministic.
-    ///
-    /// * `page_w_pt` / `page_h_pt` — page size; all four page margins are 0.
-    /// * `before_extent_pt` — `region-before` extent (0 ⇒ no header region).
-    /// * `header` — if true, a `static-content` (region-before) with one block.
-    /// * `blocks` — the flow's blocks; each block's height equals its line-height
-    ///   (the blocks carry no text, so block height == resolved line-height).
-    fn build_doc(
-        page_w_pt: f64,
-        page_h_pt: f64,
-        before_extent_pt: f64,
-        header: bool,
-        blocks: &[BlockSpec],
-    ) -> FoArena<'static> {
-        build_doc_columns(
-            page_w_pt,
-            page_h_pt,
-            before_extent_pt,
-            header,
-            1,
-            0.0,
-            blocks,
-        )
-    }
-
-    /// Like [`build_doc`], but sets `column-count` / `column-gap` on the flow so
-    /// the multi-column paginator is exercised.  `column_count <= 1` yields a
-    /// single-column flow identical to [`build_doc`].
-    #[allow(clippy::too_many_arguments)]
-    fn build_doc_columns(
-        page_w_pt: f64,
-        page_h_pt: f64,
-        before_extent_pt: f64,
-        header: bool,
-        column_count: i32,
-        column_gap_pt: f64,
-        blocks: &[BlockSpec],
-    ) -> FoArena<'static> {
-        let mut fo = FoArena::new();
-        let root = fo.add_node(FoNode::new(FoNodeData::Root));
-
-        // --- layout-master-set / simple-page-master ---
-        let lms = fo.add_node(FoNode::new(FoNodeData::LayoutMasterSet));
-        fo.append_child(root, lms).expect("test: append lms");
-
-        let mut spm_props = PropertyList::new();
-        spm_props.set(
-            PropertyId::PageWidth,
-            PropertyValue::Length(Length::from_pt(page_w_pt)),
-        );
-        spm_props.set(
-            PropertyId::PageHeight,
-            PropertyValue::Length(Length::from_pt(page_h_pt)),
-        );
-        for margin in [
-            PropertyId::MarginTop,
-            PropertyId::MarginBottom,
-            PropertyId::MarginLeft,
-            PropertyId::MarginRight,
-        ] {
-            spm_props.set(margin, PropertyValue::Length(Length::ZERO));
-        }
-        let spm = fo.add_node(FoNode::new(FoNodeData::SimplePageMaster {
-            master_name: "pm".to_string(),
-            properties: spm_props,
-        }));
-        fo.append_child(lms, spm).expect("test: append spm");
-
-        if before_extent_pt > 0.0 {
-            let mut rb_props = PropertyList::new();
-            rb_props.set(
-                PropertyId::Extent,
-                PropertyValue::Length(Length::from_pt(before_extent_pt)),
-            );
-            let rb = fo.add_node(FoNode::new(FoNodeData::RegionBefore {
-                properties: rb_props,
-            }));
-            fo.append_child(spm, rb)
-                .expect("test: append region-before");
-        }
-        let body = fo.add_node(FoNode::new(FoNodeData::RegionBody {
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(spm, body)
-            .expect("test: append region-body");
-
-        // --- page-sequence ---
-        let ps = fo.add_node(FoNode::new(FoNodeData::PageSequence {
-            master_reference: "pm".to_string(),
-            format: "1".to_string(),
-            grouping_separator: None,
-            grouping_size: None,
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(root, ps)
-            .expect("test: append page-sequence");
-
-        if header {
-            let sc = fo.add_node(FoNode::new(FoNodeData::StaticContent {
-                flow_name: "xsl-region-before".to_string(),
-                properties: PropertyList::new(),
-            }));
-            fo.append_child(ps, sc)
-                .expect("test: append static-content");
-            let mut hp = PropertyList::new();
-            hp.set(
-                PropertyId::LineHeight,
-                PropertyValue::Length(Length::from_pt(20.0)),
-            );
-            let hb = fo.add_node(FoNode::new(FoNodeData::Block { properties: hp }));
-            fo.append_child(sc, hb).expect("test: append header block");
-            let ht = fo.add_node(FoNode::new(FoNodeData::Text("HEADER".to_string())));
-            fo.append_child(hb, ht).expect("test: append header text");
-        }
-
-        let mut flow_props = PropertyList::new();
-        if column_count > 1 {
-            flow_props.set(
-                PropertyId::ColumnCount,
-                PropertyValue::Integer(column_count),
-            );
-            flow_props.set(
-                PropertyId::ColumnGap,
-                PropertyValue::Length(Length::from_pt(column_gap_pt)),
-            );
-        }
-        let flow = fo.add_node(FoNode::new(FoNodeData::Flow {
-            flow_name: "xsl-region-body".to_string(),
-            properties: flow_props,
-        }));
-        fo.append_child(ps, flow).expect("test: append flow");
-
-        for spec in blocks {
-            let mut bp = PropertyList::new();
-            bp.set(
-                PropertyId::LineHeight,
-                PropertyValue::Length(Length::from_pt(spec.height_pt)),
-            );
-            if let Some(bb) = spec.break_before {
-                bp.set(
-                    PropertyId::BreakBefore,
-                    PropertyValue::String(Cow::Borrowed(bb)),
-                );
-            }
-            let b = fo.add_node(FoNode::new(FoNodeData::Block { properties: bp }));
-            fo.append_child(flow, b).expect("test: append flow block");
-        }
-
-        fo
-    }
-
-    /// All top-level `Page` areas in tree order.
-    fn page_ids(tree: &AreaTree) -> Vec<AreaId> {
-        tree.iter()
-            .filter(|(_, node)| node.area.area_type == AreaType::Page)
-            .map(|(id, _)| id)
-            .collect()
-    }
-
-    /// The region-body of a page (its single `Region`-typed child).
-    fn region_of(tree: &AreaTree, page_id: AreaId) -> AreaId {
-        tree.children(page_id)
-            .into_iter()
-            .find(|c| {
-                tree.get(*c)
-                    .map(|n| n.area.area_type == AreaType::Region)
-                    .unwrap_or(false)
-            })
-            .expect("test: page must have a region-body")
-    }
-
-    /// The `Block` children of a region-body.
-    fn blocks_of(tree: &AreaTree, region_id: AreaId) -> Vec<AreaId> {
-        tree.children(region_id)
-            .into_iter()
-            .filter(|c| {
-                tree.get(*c)
-                    .map(|n| n.area.area_type == AreaType::Block)
-                    .unwrap_or(false)
-            })
-            .collect()
-    }
-
-    /// Tall flow ⇒ ≥2 pages, real reparenting, and every page's content fits
-    /// inside its region-body.
-    ///
-    /// Geometry: page 200×250pt, margins 0, no header ⇒ body-rect = 200×250pt.
-    /// Blocks: 4 × 100pt. Two blocks fill 200pt (≤250); a third would reach
-    /// 300pt (>250) ⇒ 2 blocks per page ⇒ ceil(4/2) = 2 pages.
-    #[test]
-    fn test_overflow_produces_multiple_pages_with_reparenting() {
-        let doc = build_doc(
-            200.0,
-            250.0,
-            0.0,
-            false,
-            &[block(100.0), block(100.0), block(100.0), block(100.0)],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(
-            pages.len(),
-            2,
-            "4×100pt blocks in a 250pt body must paginate to 2 pages"
-        );
-
-        // Every page's region-body content must fit within the body height.
-        let mut total_blocks = 0;
-        for page_id in &pages {
-            let region_id = region_of(&tree, *page_id);
-            let body_height = tree
-                .get(region_id)
-                .expect("test: region exists")
-                .area
-                .height();
-            for block_id in blocks_of(&tree, region_id) {
-                let b = tree.get(block_id).expect("test: block exists");
-                let bottom = b.area.geometry.y + b.area.height();
-                assert!(
-                    bottom <= body_height,
-                    "block bottom {}pt must not exceed body height {}pt",
-                    bottom.to_pt(),
-                    body_height.to_pt()
-                );
-                total_blocks += 1;
-            }
-        }
-        assert_eq!(total_blocks, 4, "all 4 blocks must be placed exactly once");
-
-        // Real reparenting: the second page's blocks must genuinely live under
-        // the second page's region-body (verified through the parent links).
-        let page2 = pages[1];
-        let region2 = region_of(&tree, page2);
-        let page2_blocks = blocks_of(&tree, region2);
-        assert_eq!(page2_blocks.len(), 2, "page 2 holds the 2 overflow blocks");
-        for block_id in page2_blocks {
-            let block = tree.get(block_id).expect("test: block exists");
-            assert_eq!(
-                block.parent,
-                Some(region2),
-                "overflow block must be parented to page 2's region-body"
-            );
-            // The first overflow block restarts at the body top (y = 0).
-        }
-        assert_eq!(
-            tree.get(region2).expect("test: region2 exists").parent,
-            Some(page2),
-            "region-body must be parented to its page"
-        );
-        // The first overflow block of page 2 sits flush at the body top.
-        let first_p2_block = blocks_of(&tree, region2)[0];
-        assert_eq!(
-            tree.get(first_p2_block)
-                .expect("test: block exists")
-                .area
-                .geometry
-                .y,
-            Length::ZERO,
-            "first block on a new page restarts at the body top"
-        );
-    }
-
-    /// Static content (a header) repeats on every page of a multi-page sequence.
-    ///
-    /// Geometry: page 200×300pt, margins 0, region-before extent 40pt ⇒
-    /// body height = 300 − 40 = 260pt. Blocks: 5 × 100pt ⇒ 2 per page
-    /// (3rd would reach 300pt > 260) ⇒ ceil(5/2) = 3 pages ⇒ 3 headers.
-    #[test]
-    fn test_header_repeats_on_every_page() {
-        let doc = build_doc(
-            200.0,
-            300.0,
-            40.0,
-            true,
-            &[
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-            ],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(
-            pages.len(),
-            3,
-            "5×100pt blocks in a 260pt body must paginate to 3 pages"
-        );
-
-        // Exactly one Header area per page, each parented to a distinct page.
-        let mut header_pages = Vec::new();
-        for (id, node) in tree.iter() {
-            if node.area.area_type == AreaType::Header {
-                header_pages.push(node.parent.expect("test: header has a parent"));
-                // Sanity: the header area id is real.
-                let _ = id;
-            }
-        }
-        assert_eq!(
-            header_pages.len(),
-            3,
-            "the header static-content must repeat on all 3 pages"
-        );
-        header_pages.sort_by_key(|p| p.index());
-        header_pages.dedup();
-        assert_eq!(
-            header_pages.len(),
-            3,
-            "each repeated header must belong to a distinct page"
-        );
-    }
-
-    /// A short document still produces exactly one page (regression guard).
-    ///
-    /// Geometry: page 200×250pt, margins 0 ⇒ body 250pt. Two 100pt blocks total
-    /// 200pt ≤ 250pt ⇒ a single page.
-    #[test]
-    fn test_short_document_is_single_page() {
-        let doc = build_doc(200.0, 250.0, 0.0, false, &[block(100.0), block(100.0)]);
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(pages.len(), 1, "200pt of content fits one 250pt body");
-
-        let region_id = region_of(&tree, pages[0]);
-        assert_eq!(
-            blocks_of(&tree, region_id).len(),
-            2,
-            "both blocks live on the single page"
-        );
-    }
-
-    /// A forced `break-before="page"` starts a new page even when the content
-    /// would otherwise fit, and the block is reparented onto the new page.
-    ///
-    /// Geometry: page 200×600pt, margins 0 ⇒ body 600pt (no height overflow).
-    /// Two 50pt blocks easily fit, but block 2 carries break-before=page.
-    #[test]
-    fn test_forced_break_before_starts_new_page() {
-        let doc = build_doc(
-            200.0,
-            600.0,
-            0.0,
-            false,
-            &[block(50.0), block_break_before(50.0, "page")],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(
-            pages.len(),
-            2,
-            "break-before=page must force a 2nd page despite the content fitting"
-        );
-
-        let region1 = region_of(&tree, pages[0]);
-        let region2 = region_of(&tree, pages[1]);
-        assert_eq!(
-            blocks_of(&tree, region1).len(),
-            1,
-            "the first block stays on page 1"
-        );
-        let p2_blocks = blocks_of(&tree, region2);
-        assert_eq!(p2_blocks.len(), 1, "the break-before block moves to page 2");
-        assert_eq!(
-            tree.get(p2_blocks[0]).expect("test: block exists").parent,
-            Some(region2),
-            "the break-before block is parented under page 2's region-body"
-        );
-    }
-
-    /// Keep-with-previous drags the preceding block onto the new page so the
-    /// pair is not split by a height-overflow break.
-    ///
-    /// Geometry: page 200×250pt, margins 0 ⇒ body 250pt. Blocks: b1=100pt,
-    /// b2=100pt, b3=100pt with keep-with-previous. Naively b1,b2 fill page 1
-    /// (200pt) and b3 overflows alone; but keep-with-previous glues b3 to b2, so
-    /// the b2+b3 pair migrates together ⇒ page 1 = [b1], page 2 = [b2, b3].
-    #[test]
-    fn test_keep_with_previous_migrates_pair() {
-        let mut fo = FoArena::new();
-        let root = fo.add_node(FoNode::new(FoNodeData::Root));
-        let lms = fo.add_node(FoNode::new(FoNodeData::LayoutMasterSet));
-        fo.append_child(root, lms).expect("test: append lms");
-
-        let mut spm_props = PropertyList::new();
-        spm_props.set(
-            PropertyId::PageWidth,
-            PropertyValue::Length(Length::from_pt(200.0)),
-        );
-        spm_props.set(
-            PropertyId::PageHeight,
-            PropertyValue::Length(Length::from_pt(250.0)),
-        );
-        for margin in [
-            PropertyId::MarginTop,
-            PropertyId::MarginBottom,
-            PropertyId::MarginLeft,
-            PropertyId::MarginRight,
-        ] {
-            spm_props.set(margin, PropertyValue::Length(Length::ZERO));
-        }
-        let spm = fo.add_node(FoNode::new(FoNodeData::SimplePageMaster {
-            master_name: "pm".to_string(),
-            properties: spm_props,
-        }));
-        fo.append_child(lms, spm).expect("test: append spm");
-        let body = fo.add_node(FoNode::new(FoNodeData::RegionBody {
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(spm, body)
-            .expect("test: append region-body");
-
-        let ps = fo.add_node(FoNode::new(FoNodeData::PageSequence {
-            master_reference: "pm".to_string(),
-            format: "1".to_string(),
-            grouping_separator: None,
-            grouping_size: None,
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(root, ps)
-            .expect("test: append page-sequence");
-        let flow = fo.add_node(FoNode::new(FoNodeData::Flow {
-            flow_name: "xsl-region-body".to_string(),
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(ps, flow).expect("test: append flow");
-
-        // b1, b2 (plain 100pt) and b3 (100pt, keep-with-previous=always).
-        for keep in [false, false, true] {
-            let mut bp = PropertyList::new();
-            bp.set(
-                PropertyId::LineHeight,
-                PropertyValue::Length(Length::from_pt(100.0)),
-            );
-            if keep {
-                bp.set(
-                    PropertyId::KeepWithPrevious,
-                    PropertyValue::String(Cow::Borrowed("always")),
-                );
-            }
-            let b = fo.add_node(FoNode::new(FoNodeData::Block { properties: bp }));
-            fo.append_child(flow, b).expect("test: append block");
-        }
-
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&fo).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(pages.len(), 2, "the glued pair forces a 2-page layout");
-
-        let region1 = region_of(&tree, pages[0]);
-        let region2 = region_of(&tree, pages[1]);
-        assert_eq!(
-            blocks_of(&tree, region1).len(),
-            1,
-            "page 1 keeps only b1 — b2 is dragged forward by b3's keep-with-previous"
-        );
-        assert_eq!(
-            blocks_of(&tree, region2).len(),
-            2,
-            "page 2 holds the glued b2+b3 pair"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Multi-column cross-page pagination
-    // -----------------------------------------------------------------------
-
-    /// The x (column) offset of a block area, in points.
-    fn block_x_pt(tree: &AreaTree, block_id: AreaId) -> f64 {
-        tree.get(block_id)
-            .expect("test: block exists")
-            .area
-            .geometry
-            .x
-            .to_pt()
-    }
-
-    /// The y (in-column) offset of a block area, in points.
-    fn block_y_pt(tree: &AreaTree, block_id: AreaId) -> f64 {
-        tree.get(block_id)
-            .expect("test: block exists")
-            .area
-            .geometry
-            .y
-            .to_pt()
-    }
-
-    /// A 2-column flow with more content than fits both columns of one page must
-    /// paginate to ≥2 pages, placing every block exactly once.
-    ///
-    /// Geometry: page 200×250pt, margins 0, no header ⇒ body 200×250pt, 2 columns
-    /// gap 0 ⇒ each column is 100pt wide and 250pt tall ⇒ holds two 100pt blocks
-    /// (a third reaches 300 > 250).  6 blocks ⇒ page 1 fills both columns (4
-    /// blocks) and 2 spill onto page 2.
-    #[test]
-    fn test_multicolumn_overflow_produces_multiple_pages() {
-        let doc = build_doc_columns(
-            200.0,
-            250.0,
-            0.0,
-            false,
-            2,
-            0.0,
-            &[
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-            ],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(
-            pages.len(),
-            2,
-            "6×100pt blocks in two 250pt columns must paginate to 2 pages"
-        );
-
-        let region1 = region_of(&tree, pages[0]);
-        let region2 = region_of(&tree, pages[1]);
-        assert_eq!(
-            blocks_of(&tree, region1).len(),
-            4,
-            "page 1 fills both columns (2 blocks each)"
-        );
-        assert_eq!(
-            blocks_of(&tree, region2).len(),
-            2,
-            "the 2 overflow blocks land on page 2"
-        );
-
-        // Every block placed exactly once across both pages.
-        let total: usize = pages
-            .iter()
-            .map(|p| blocks_of(&tree, region_of(&tree, *p)).len())
-            .sum();
-        assert_eq!(total, 6, "all 6 blocks placed exactly once");
-    }
-
-    /// Columns fill left then right before the page breaks: on page 1 the first
-    /// two blocks sit in the left column (x = 0) and the next two in the right
-    /// column (x = 100pt), with the right column restarting at the body top.
-    #[test]
-    fn test_multicolumn_fills_left_then_right_before_break() {
-        let doc = build_doc_columns(
-            200.0,
-            250.0,
-            0.0,
-            false,
-            2,
-            0.0,
-            &[
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-            ],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        let region1 = region_of(&tree, pages[0]);
-        let p1 = blocks_of(&tree, region1);
-        assert_eq!(p1.len(), 4, "page 1 holds 4 blocks (2 per column)");
-
-        // Left column (x = 0) fills first: blocks 0 and 1.
-        assert!(
-            block_x_pt(&tree, p1[0]).abs() < 0.01,
-            "block 1 is in the left column"
-        );
-        assert!(
-            block_x_pt(&tree, p1[1]).abs() < 0.01,
-            "block 2 is in the left column"
-        );
-        assert!(
-            block_y_pt(&tree, p1[0]).abs() < 0.01,
-            "block 1 sits at the column top"
-        );
-        assert!(
-            (block_y_pt(&tree, p1[1]) - 100.0).abs() < 0.01,
-            "block 2 stacks below block 1 in the left column"
-        );
-
-        // Right column (x = 100pt) only after the left column is full.
-        assert!(
-            (block_x_pt(&tree, p1[2]) - 100.0).abs() < 0.01,
-            "block 3 starts the right column"
-        );
-        assert!(
-            (block_x_pt(&tree, p1[3]) - 100.0).abs() < 0.01,
-            "block 4 is in the right column"
-        );
-        assert!(
-            block_y_pt(&tree, p1[2]).abs() < 0.01,
-            "the right column restarts at the body top"
-        );
-        assert!(
-            (block_y_pt(&tree, p1[3]) - 100.0).abs() < 0.01,
-            "block 4 stacks below block 3 in the right column"
-        );
-    }
-
-    /// Static content (a header) repeats on every page of a multi-column,
-    /// multi-page sequence.
-    ///
-    /// Geometry: page 200×300pt, region-before extent 40 ⇒ body 200×260pt, 2
-    /// columns ⇒ each column holds two 100pt blocks (third reaches 300 > 260).
-    /// 6 blocks ⇒ page 1 fills both columns (4 blocks), 2 spill to page 2 ⇒ 2
-    /// pages ⇒ 2 repeated headers.
-    #[test]
-    fn test_multicolumn_header_repeats_on_every_page() {
-        let doc = build_doc_columns(
-            200.0,
-            300.0,
-            40.0,
-            true,
-            2,
-            0.0,
-            &[
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-                block(100.0),
-            ],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(
-            pages.len(),
-            2,
-            "6 blocks across two 2-column pages ⇒ 2 pages"
-        );
-
-        let mut header_pages = Vec::new();
-        for (_, node) in tree.iter() {
-            if node.area.area_type == AreaType::Header {
-                header_pages.push(node.parent.expect("test: header has a parent"));
-            }
-        }
-        assert_eq!(
-            header_pages.len(),
-            2,
-            "the header static-content must repeat on both pages"
-        );
-        header_pages.sort_by_key(|p| p.index());
-        header_pages.dedup();
-        assert_eq!(
-            header_pages.len(),
-            2,
-            "each repeated header must belong to a distinct page"
-        );
-    }
-
-    /// A short 2-column document stays on a single page; the second column is
-    /// used once the first is full, but no new page is started.
-    ///
-    /// Geometry: page 200×250pt, 2 columns ⇒ each column holds two 100pt blocks.
-    /// 3 blocks ⇒ left column holds blocks 1 & 2, block 3 starts the right
-    /// column — still one page.
-    #[test]
-    fn test_multicolumn_short_document_single_page() {
-        let doc = build_doc_columns(
-            200.0,
-            250.0,
-            0.0,
-            false,
-            2,
-            0.0,
-            &[block(100.0), block(100.0), block(100.0)],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(pages.len(), 1, "3 blocks fit within one 2-column page");
-
-        let region = region_of(&tree, pages[0]);
-        let blocks = blocks_of(&tree, region);
-        assert_eq!(blocks.len(), 3, "all 3 blocks live on the single page");
-
-        // Blocks 1 & 2 in the left column, block 3 in the right column.
-        assert!(
-            block_x_pt(&tree, blocks[0]).abs() < 0.01,
-            "block 1 in left column"
-        );
-        assert!(
-            block_x_pt(&tree, blocks[1]).abs() < 0.01,
-            "block 2 in left column"
-        );
-        assert!(
-            (block_x_pt(&tree, blocks[2]) - 100.0).abs() < 0.01,
-            "block 3 spills into the right column"
-        );
-    }
-
-    /// Regression: an explicit `column-count="1"` flow is routed through the
-    /// single-column paginator and behaves exactly like the default
-    /// single-column path — vertical stacking (every block at x = 0) with
-    /// height-overflow pagination.
-    ///
-    /// Geometry: page 200×250pt, body 250pt, 4×100pt blocks ⇒ 2 blocks per page
-    /// ⇒ 2 pages, all blocks in a single column at x = 0.
-    #[test]
-    fn test_column_count_one_uses_single_column_pagination() {
-        let doc = build_doc_columns(
-            200.0,
-            250.0,
-            0.0,
-            false,
-            1,
-            0.0,
-            &[block(100.0), block(100.0), block(100.0), block(100.0)],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(
-            pages.len(),
-            2,
-            "column-count=1 must paginate by height like the single-column path"
-        );
-
-        for page_id in &pages {
-            let region = region_of(&tree, *page_id);
-            let blocks = blocks_of(&tree, region);
-            assert_eq!(blocks.len(), 2, "2 blocks per page in a single column");
-            for block_id in blocks {
-                assert!(
-                    block_x_pt(&tree, block_id).abs() < 0.01,
-                    "single-column blocks all stack at x = 0"
-                );
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Page-accurate fo:marker / fo:retrieve-marker (running headers)
-    // -----------------------------------------------------------------------
-
-    use fop_core::tree::RetrievePosition;
-
-    /// Build a paginated document whose region-before header retrieves the
-    /// `sec` marker, and whose flow stacks one block per `block_markers` entry —
-    /// each `Some(text)` block carrying an `fo:marker marker-class-name="sec"`
-    /// whose content is that `text`, each `None` block carrying no marker.
-    ///
-    /// * page margins are 0 and `before_extent_pt` sizes the header region, so
-    ///   the body height is `page_h_pt - before_extent_pt`; with `block_height_pt`
-    ///   chosen against it the test controls how many marker blocks land per page.
-    /// * the header's `fo:retrieve-marker` is a direct child of the
-    ///   `fo:static-content` (the form the engine resolves) using
-    ///   `retrieve_position` and `retrieve_boundary`.
-    #[allow(clippy::too_many_arguments)]
-    fn build_marker_doc(
-        page_w_pt: f64,
-        page_h_pt: f64,
-        before_extent_pt: f64,
-        retrieve_position: RetrievePosition,
-        retrieve_boundary: &'static str,
-        block_height_pt: f64,
-        block_markers: &[Option<&str>],
-    ) -> FoArena<'static> {
-        let mut fo = FoArena::new();
-        let root = fo.add_node(FoNode::new(FoNodeData::Root));
-
-        let lms = fo.add_node(FoNode::new(FoNodeData::LayoutMasterSet));
-        fo.append_child(root, lms).expect("test: append lms");
-
-        let mut spm_props = PropertyList::new();
-        spm_props.set(
-            PropertyId::PageWidth,
-            PropertyValue::Length(Length::from_pt(page_w_pt)),
-        );
-        spm_props.set(
-            PropertyId::PageHeight,
-            PropertyValue::Length(Length::from_pt(page_h_pt)),
-        );
-        for margin in [
-            PropertyId::MarginTop,
-            PropertyId::MarginBottom,
-            PropertyId::MarginLeft,
-            PropertyId::MarginRight,
-        ] {
-            spm_props.set(margin, PropertyValue::Length(Length::ZERO));
-        }
-        let spm = fo.add_node(FoNode::new(FoNodeData::SimplePageMaster {
-            master_name: "pm".to_string(),
-            properties: spm_props,
-        }));
-        fo.append_child(lms, spm).expect("test: append spm");
-
-        let mut rb_props = PropertyList::new();
-        rb_props.set(
-            PropertyId::Extent,
-            PropertyValue::Length(Length::from_pt(before_extent_pt)),
-        );
-        let rb = fo.add_node(FoNode::new(FoNodeData::RegionBefore {
-            properties: rb_props,
-        }));
-        fo.append_child(spm, rb)
-            .expect("test: append region-before");
-
-        let body = fo.add_node(FoNode::new(FoNodeData::RegionBody {
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(spm, body)
-            .expect("test: append region-body");
-
-        let ps = fo.add_node(FoNode::new(FoNodeData::PageSequence {
-            master_reference: "pm".to_string(),
-            format: "1".to_string(),
-            grouping_separator: None,
-            grouping_size: None,
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(root, ps)
-            .expect("test: append page-sequence");
-
-        // Header: a static-content whose direct child is the retrieve-marker.
-        let sc = fo.add_node(FoNode::new(FoNodeData::StaticContent {
-            flow_name: "xsl-region-before".to_string(),
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(ps, sc)
-            .expect("test: append static-content");
-        let mut rm_props = PropertyList::new();
-        rm_props.set(
-            PropertyId::RetrieveBoundary,
-            PropertyValue::String(Cow::Borrowed(retrieve_boundary)),
-        );
-        let rm = fo.add_node(FoNode::new(FoNodeData::RetrieveMarker {
-            retrieve_class_name: "sec".to_string(),
-            retrieve_position,
-            properties: rm_props,
-        }));
-        fo.append_child(sc, rm)
-            .expect("test: append retrieve-marker");
-
-        // Flow: one block per entry, optionally carrying a `sec` marker.
-        let flow = fo.add_node(FoNode::new(FoNodeData::Flow {
-            flow_name: "xsl-region-body".to_string(),
-            properties: PropertyList::new(),
-        }));
-        fo.append_child(ps, flow).expect("test: append flow");
-
-        for marker_text in block_markers {
-            let mut bp = PropertyList::new();
-            bp.set(
-                PropertyId::LineHeight,
-                PropertyValue::Length(Length::from_pt(block_height_pt)),
-            );
-            let block = fo.add_node(FoNode::new(FoNodeData::Block { properties: bp }));
-            fo.append_child(flow, block)
-                .expect("test: append flow block");
-
-            if let Some(text) = marker_text {
-                let marker = fo.add_node(FoNode::new(FoNodeData::Marker {
-                    marker_class_name: "sec".to_string(),
-                    properties: PropertyList::new(),
-                }));
-                fo.append_child(block, marker).expect("test: append marker");
-                let mut mbp = PropertyList::new();
-                mbp.set(
-                    PropertyId::LineHeight,
-                    PropertyValue::Length(Length::from_pt(12.0)),
-                );
-                let marker_block = fo.add_node(FoNode::new(FoNodeData::Block { properties: mbp }));
-                fo.append_child(marker, marker_block)
-                    .expect("test: append marker block");
-                let marker_text_node = fo.add_node(FoNode::new(FoNodeData::Text(text.to_string())));
-                fo.append_child(marker_block, marker_text_node)
-                    .expect("test: append marker text");
-            }
-        }
-
-        fo
-    }
-
-    /// Concatenated, trimmed text rendered into a page's `Header` area (the
-    /// content the running header's retrieve-marker resolved to).
-    fn header_text(tree: &AreaTree, page_id: AreaId) -> String {
-        let header = tree.children(page_id).into_iter().find(|&child| {
-            tree.get(child)
-                .map(|n| n.area.area_type == AreaType::Header)
-                .unwrap_or(false)
-        });
-        let mut out = String::new();
-        if let Some(header_id) = header {
-            collect_area_text(tree, header_id, &mut out);
-        }
-        out.trim().to_string()
-    }
-
-    /// Append all `Text` content under `id` (depth-first) to `out`.
-    fn collect_area_text(tree: &AreaTree, id: AreaId, out: &mut String) {
-        if let Some(node) = tree.get(id) {
-            if let Some(text) = node.area.text_content() {
-                out.push_str(text);
-            }
-            for child_id in tree.children(id) {
-                collect_area_text(tree, child_id, out);
-            }
-        }
-    }
-
-    /// Each page's running header shows the marker that starts on *that* page —
-    /// not a single marker repeated on every page (the bug this fixes).
-    ///
-    /// Geometry: page 200×300pt, region-before extent 40 ⇒ body 260pt; 100pt
-    /// marker blocks ⇒ 2 per page.  Blocks carry Alpha, Bravo, Charlie, Delta ⇒
-    /// page 1 = {Alpha, Bravo}, page 2 = {Charlie, Delta}.  With
-    /// `first-starting-within-page` page 1's header is Alpha and page 2's is
-    /// Charlie.
-    #[test]
-    fn test_marker_resolves_per_page_first_starting() {
-        let doc = build_marker_doc(
-            200.0,
-            300.0,
-            40.0,
-            RetrievePosition::FirstStartingWithinPage,
-            "page-sequence",
-            100.0,
-            &[Some("Alpha"), Some("Bravo"), Some("Charlie"), Some("Delta")],
-        );
-        let engine = LayoutEngine::new();
-        let tree = engine.layout(&doc).expect("test: layout should succeed");
-
-        let pages = page_ids(&tree);
-        assert_eq!(
-            pages.len(),
-            2,
-            "4×100pt marker blocks in a 260pt body ⇒ 2 pages"
-        );
-
-        let p1 = header_text(&tree, pages[0]);
-        let p2 = header_text(&tree, pages[1]);
-        assert!(
-            p1.contains("Alpha") && !p1.contains("Charlie"),
-            "page 1 header must show the marker starting on page 1 (Alpha), got {:?}",
-            p1
-        );
-        assert!(
-            p2.contains("Charlie") && !p2.contains("Alpha"),
-            "page 2 header must show the marker starting on page 2 (Charlie), got {:?}",
-            p2
-        );
-        assert_ne!(p1, p2, "the two pages must show different markers");
-    }
-
-    /// On a page with two markers of the class, `first-starting-within-page` and
-    /// `last-starting-within-page` select different markers.
-    ///
-    /// Same geometry/flow as above: page 1 = {Alpha, Bravo}.  `first-starting`
-    /// yields Alpha; `last-starting` yields Bravo.
-    #[test]
-    fn test_marker_first_vs_last_starting_within_page() {
-        let blocks = [Some("Alpha"), Some("Bravo"), Some("Charlie"), Some("Delta")];
-
-        let first_doc = build_marker_doc(
-            200.0,
-            300.0,
-            40.0,
-            RetrievePosition::FirstStartingWithinPage,
-            "page-sequence",
-            100.0,
-            &blocks,
-        );
-        let last_doc = build_marker_doc(
-            200.0,
-            300.0,
-            40.0,
-            RetrievePosition::LastStartingWithinPage,
-            "page-sequence",
-            100.0,
-            &blocks,
-        );
-        let engine = LayoutEngine::new();
-        let first_tree = engine
-            .layout(&first_doc)
-            .expect("test: layout should succeed");
-        let last_tree = engine
-            .layout(&last_doc)
-            .expect("test: layout should succeed");
-
-        let first_p1 = header_text(&first_tree, page_ids(&first_tree)[0]);
-        let last_p1 = header_text(&last_tree, page_ids(&last_tree)[0]);
-
-        assert!(
-            first_p1.contains("Alpha") && !first_p1.contains("Bravo"),
-            "first-starting must pick the first of two same-page markers (Alpha), got {:?}",
-            first_p1
-        );
-        assert!(
-            last_p1.contains("Bravo") && !last_p1.contains("Alpha"),
-            "last-starting must pick the last of two same-page markers (Bravo), got {:?}",
-            last_p1
-        );
-        assert_ne!(
-            first_p1, last_p1,
-            "first-starting and last-starting must differ on a 2-marker page"
-        );
-    }
-
-    /// A page that sets no marker carries over the previous page's marker under
-    /// `last-ending-within-page` (the position that, like a running "current
-    /// section" header, shows the page's own marker when present and otherwise
-    /// the one still in effect).  `last-starting-within-page` leaves the
-    /// markerless page's header empty (starting positions do not carry over).
-    ///
-    /// Geometry: page 200×180pt, region-before extent 40 ⇒ body 140pt; 100pt
-    /// blocks ⇒ one per page.  Blocks carry Alpha, (none), Bravo ⇒ page 1 sets
-    /// Alpha, page 2 sets nothing, page 3 sets Bravo.  `last-ending-within-page`
-    /// ⇒ page 1 Alpha, page 2 carries over Alpha, page 3 shows its own Bravo.
-    #[test]
-    fn test_marker_carryover_when_page_has_no_fresh_marker() {
-        let flow = [Some("Alpha"), None, Some("Bravo")];
-
-        let carry_doc = build_marker_doc(
-            200.0,
-            180.0,
-            40.0,
-            RetrievePosition::LastEndingWithinPage,
-            "page-sequence",
-            100.0,
-            &flow,
-        );
-        let starting_doc = build_marker_doc(
-            200.0,
-            180.0,
-            40.0,
-            RetrievePosition::LastStartingWithinPage,
-            "page-sequence",
-            100.0,
-            &flow,
-        );
-        let engine = LayoutEngine::new();
-        let carry_tree = engine
-            .layout(&carry_doc)
-            .expect("test: layout should succeed");
-        let starting_tree = engine
-            .layout(&starting_doc)
-            .expect("test: layout should succeed");
-
-        let carry_pages = page_ids(&carry_tree);
-        assert_eq!(
-            carry_pages.len(),
-            3,
-            "3×100pt blocks in a 140pt body ⇒ 3 pages"
-        );
-
-        let p1 = header_text(&carry_tree, carry_pages[0]);
-        let p2 = header_text(&carry_tree, carry_pages[1]);
-        let p3 = header_text(&carry_tree, carry_pages[2]);
-        assert!(
-            p1.contains("Alpha") && !p1.contains("Bravo"),
-            "page 1 header shows its own marker (Alpha), got {:?}",
-            p1
-        );
-        assert!(
-            p2.contains("Alpha") && !p2.contains("Bravo"),
-            "page 2 sets no marker and must carry over Alpha, got {:?}",
-            p2
-        );
-        assert!(
-            p3.contains("Bravo") && !p3.contains("Alpha"),
-            "page 3 sets and shows its own marker (Bravo), got {:?}",
-            p3
-        );
-
-        // last-starting-within-page: page 2 has no qualifying marker ⇒ empty
-        // (starting positions never carry over).
-        let starting_pages = page_ids(&starting_tree);
-        assert!(
-            header_text(&starting_tree, starting_pages[1]).is_empty(),
-            "last-starting must not carry over: page 2's header is empty, got {:?}",
-            header_text(&starting_tree, starting_pages[1])
-        );
-    }
-}
+#[path = "pagination_tests.rs"]
+mod tests;

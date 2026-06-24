@@ -379,32 +379,256 @@ impl PageBreaker {
         current_height + content_height <= self.content_height()
     }
 
-    /// Split a block area across multiple pages (for large blocks)
+    /// Choose a widow/orphan-valid split index for a block whose direct line
+    /// boxes are described (in stacking order) by `(top, bottom)` pairs
+    /// (block-relative, in points-as-`Length`).
+    ///
+    /// The returned `Some(k)` means *"keep lines `[0, k)` on the current page
+    /// (the head) and carry lines `[k, n)` to the continuation (the tail)"*; a
+    /// `None` means the block must **not** be split and should move whole.
+    ///
+    /// # Algorithm
+    ///
+    /// `available_height` is the vertical space the block may occupy on the
+    /// current page (from the block's top edge down to the region-body bottom).
+    /// Let `n` be the number of line boxes.
+    ///
+    /// 1. **Fit count** — the largest `f` such that the first `f` lines all sit
+    ///    fully within `available_height` (`bottom[f-1] <= available_height`).
+    ///    This is the *most* head lines the page can physically hold.
+    /// 2. **Widows** — the tail must contain at least `widows` lines, so the
+    ///    head may keep at most `n - widows` lines.  Cap the head accordingly.
+    /// 3. **Orphans** — the head must contain at least `orphans` lines.  If the
+    ///    capped head already has fewer than `orphans` lines, no split point can
+    ///    satisfy both constraints simultaneously, so we refuse to split
+    ///    (`None`) — the caller then moves the whole block to the next page.
+    /// 4. The chosen `k` is the smallest of *fit count* and *widow cap*, which
+    ///    is the largest head that fits while still leaving enough widows.  It
+    ///    is `>= orphans` by step 3 and yields a tail `>= widows`, so both
+    ///    constraints hold.
+    ///
+    /// When `empty_page` is `true` (the block is being split off an otherwise
+    /// empty region-body — e.g. it is taller than a full body), the orphan
+    /// **floor** is relaxed: keeping the block whole would only clip it, so we
+    /// keep as many head lines as fit (down to a single line) to guarantee
+    /// forward progress.  We still honour orphans when the page can hold at
+    /// least `orphans` lines; we only drop below it when the page genuinely
+    /// cannot hold that many.  Widows are still honoured on an empty page when
+    /// possible, but never at the cost of placing zero head lines.
+    pub fn widow_orphan_split_index(
+        line_bottoms: &[Length],
+        available_height: Length,
+        widows: i32,
+        orphans: i32,
+        empty_page: bool,
+    ) -> Option<usize> {
+        let n = line_bottoms.len();
+        if n == 0 {
+            return None;
+        }
+        let widows = widows.max(0) as usize;
+        let orphans = orphans.max(0) as usize;
+
+        // Step 1: how many leading lines physically fit above the body bottom.
+        let mut fit_count = 0usize;
+        for &bottom in line_bottoms {
+            if bottom <= available_height {
+                fit_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        if !empty_page {
+            // A non-empty page with no fitting line cannot host any head: defer
+            // the whole block to the next page.
+            if fit_count == 0 {
+                return None;
+            }
+            // Step 2: cap the head so at least `widows` lines remain as tail.
+            // If the block has fewer than `widows + orphans` lines it can never
+            // be split legally — `widow_cap < orphans` triggers the `None`
+            // below.
+            let widow_cap = n.saturating_sub(widows);
+            let head = fit_count.min(widow_cap);
+            // Step 3: orphans floor.  Also reject a degenerate "tail is empty"
+            // (head == n) which would not actually split anything.
+            if head < orphans || head == 0 || head >= n {
+                return None;
+            }
+            Some(head)
+        } else {
+            // Empty-page split: we *must* make progress.  Keep as many head
+            // lines as fit; if not even one fits (pathological — a single line
+            // taller than the whole body), keep exactly one so the block always
+            // advances and the remainder continues onto the next page.
+            let mut head = fit_count.max(1).min(n);
+            // Honour widows when the page can still hold a full head while
+            // leaving `widows` lines behind, but never reduce the head to zero.
+            let widow_cap = n.saturating_sub(widows);
+            if widow_cap >= 1 {
+                head = head.min(widow_cap);
+            }
+            // Honour orphans only when the page can hold at least `orphans`
+            // lines (otherwise the floor is physically impossible and we keep
+            // what fits).  Never grow the head beyond what fits — that would
+            // reintroduce overflow.
+            if orphans >= 1 && fit_count >= orphans {
+                head = head.max(orphans).min(fit_count.max(1));
+            }
+            head = head.clamp(1, n);
+            if head >= n {
+                // Everything fits after all — nothing to split.
+                return None;
+            }
+            Some(head)
+        }
+    }
+
+    /// Split the block area `area_id` at a line-box boundary, moving the tail
+    /// line boxes into a freshly created **continuation block** and returning
+    /// its id (`Ok(Some(continuation_id))`).  Returns `Ok(None)` when the block
+    /// must not be split — either it already fits, it has no line-box children,
+    /// `keep-together="always"` forbids splitting, or widow/orphan control
+    /// admits no legal split point — in which case the caller moves the whole
+    /// block to the next page.
+    ///
+    /// `available_height` is the space the block may occupy on the current page
+    /// (its top edge to the region-body bottom).  `empty_page` should be `true`
+    /// when the block is the first content of an otherwise empty region-body
+    /// (it relaxes the orphan floor so a block taller than a full body still
+    /// makes progress rather than clipping).
+    ///
+    /// # Geometry surgery
+    ///
+    /// The block's direct children are line boxes (`Line` / `Text` / `Inline`)
+    /// whose `geometry.y` is block-relative and increasing.  The head lines
+    /// `[0, k)` stay in place; the tail lines `[k, n)` are reparented under the
+    /// continuation block and re-offset so the first tail line sits at `y = 0`.
+    /// The original block's height shrinks to the head extent; the continuation
+    /// inherits the block's `area_type`, width, x and traits (so background,
+    /// borders and padding are preserved on the broken area).  The border on
+    /// the break edge is intentionally left on **both** halves: full
+    /// break-edge border conditionality (`border-*-conditional`) is a separate,
+    /// deliberately out-of-scope refinement; keeping both edges never loses a
+    /// painted border and matches Apache FOP's default conditional behaviour
+    /// closely enough for the common (no explicit conditionality) case.
     pub fn split_area(
         &self,
         area_tree: &mut AreaTree,
         area_id: AreaId,
         available_height: Length,
+        empty_page: bool,
     ) -> Result<Option<AreaId>> {
-        // Get the area to split
-        if let Some(area_node) = area_tree.get(area_id) {
-            let area_height = area_node.area.height();
+        // Snapshot what we need from the block before mutating the tree.
+        let (block_area, area_height, widows, orphans, keeps_together) =
+            match area_tree.get(area_id) {
+                Some(node) => (
+                    node.area.clone(),
+                    node.area.height(),
+                    node.area.widows,
+                    node.area.orphans,
+                    node.area
+                        .keep_constraint
+                        .as_ref()
+                        .map(|c| c.must_keep_together())
+                        .unwrap_or(false),
+                ),
+                None => return Ok(None),
+            };
 
-            // If it fits, no split needed
-            if area_height <= available_height {
-                return Ok(None);
-            }
-
-            // Create continuation area with remaining height
-            let remaining_height = area_height - available_height;
-            let mut continuation_area = area_node.area.clone();
-            continuation_area.geometry.height = remaining_height;
-
-            let continuation_id = area_tree.add_area(continuation_area);
-            Ok(Some(continuation_id))
-        } else {
-            Ok(None)
+        // `keep-together="always"` forbids splitting the block.
+        if keeps_together {
+            return Ok(None);
         }
+
+        // If the whole block already fits, there is nothing to split.
+        if area_height <= available_height {
+            return Ok(None);
+        }
+
+        // Gather the direct line-box children (the splittable units) in order,
+        // along with their block-relative top/bottom edges.  Non-line children
+        // are not split points and are kept with whichever side their preceding
+        // line ends up on; in practice a text block's direct children are all
+        // line boxes, so this collects exactly the lines.
+        let mut line_ids: Vec<AreaId> = Vec::new();
+        let mut line_tops: Vec<Length> = Vec::new();
+        let mut line_bottoms: Vec<Length> = Vec::new();
+        for child_id in area_tree.children(area_id) {
+            if let Some(child) = area_tree.get(child_id) {
+                if matches!(
+                    child.area.area_type,
+                    AreaType::Line | AreaType::Text | AreaType::Inline
+                ) {
+                    let top = child.area.geometry.y;
+                    line_ids.push(child_id);
+                    line_tops.push(top);
+                    line_bottoms.push(top + child.area.height());
+                }
+            }
+        }
+
+        // A block with no line-box children (e.g. an image/leaf block) cannot
+        // be split at a line boundary — defer it whole.
+        if line_ids.len() < 2 {
+            return Ok(None);
+        }
+
+        let split = match Self::widow_orphan_split_index(
+            &line_bottoms,
+            available_height,
+            widows,
+            orphans,
+            empty_page,
+        ) {
+            Some(k) => k,
+            None => return Ok(None),
+        };
+
+        // Head extent: the bottom edge of the last head line bounds the height
+        // the original block now occupies on the current page.
+        let head_bottom = line_bottoms[split - 1];
+        // Tail origin: the top of the first tail line; tail lines are shifted up
+        // by this so the continuation's first line sits flush at its top.
+        let tail_origin = line_tops[split];
+
+        // Build the continuation block, preserving area_type, width, x and
+        // traits (background / borders / padding) of the broken area.  Its
+        // height is the remaining tail extent; its y is left at the broken
+        // block's y for now and is overwritten by the caller when it places the
+        // continuation on the next page (region-relative).
+        let mut continuation = block_area;
+        continuation.content = None; // line boxes carry the content
+        let tail_height = (area_height - tail_origin).max(Length::ZERO);
+        continuation.geometry.height = tail_height;
+        // A continuation block must not re-emit a forced break-before that was
+        // meant for the block's original start, and keeps no break-after until
+        // its true end (which it inherits, since it is the real end of the
+        // block).  break-before only applies to the first piece.
+        continuation.break_before = None;
+        let continuation_id = area_tree.add_area(continuation);
+
+        // Move the tail line boxes into the continuation, re-offsetting them so
+        // the first tail line starts at y = 0 within the continuation block.
+        for &line_id in &line_ids[split..] {
+            area_tree
+                .reparent(line_id, continuation_id)
+                .map_err(fop_types::FopError::Generic)?;
+            if let Some(node) = area_tree.get_mut(line_id) {
+                node.area.geometry.y -= tail_origin;
+            }
+        }
+
+        // Shrink the original (head) block to the head extent and clear its
+        // break-after — the break-after belongs to the block's true end, now on
+        // the continuation.
+        if let Some(node) = area_tree.get_mut(area_id) {
+            node.area.geometry.height = head_bottom;
+            node.area.break_after = None;
+        }
+
+        Ok(Some(continuation_id))
     }
 }
 
@@ -569,8 +793,35 @@ mod tests {
         );
     }
 
+    /// Helper: build a Block populated with `count` stacked line boxes of
+    /// `line_height` each, returning the block id.  Mirrors the structure the
+    /// line-breaker emits (direct `Text` children with block-relative y).
+    fn make_lined_block(
+        tree: &mut AreaTree,
+        count: usize,
+        line_height: Length,
+        width: Length,
+    ) -> AreaId {
+        let block = Area::new(
+            AreaType::Block,
+            Rect::from_point_size(Point::ZERO, Size::new(width, line_height * count as i32)),
+        );
+        let block_id = tree.add_area(block);
+        for i in 0..count {
+            let line = Area::new(
+                AreaType::Line,
+                Rect::new(Length::ZERO, line_height * i as i32, width, line_height),
+            );
+            let line_id = tree.add_area(line);
+            tree.append_child(block_id, line_id)
+                .expect("test: append line");
+        }
+        block_id
+    }
+
     #[test]
-    fn test_split_area() {
+    fn test_split_area_leaf_block_is_not_split() {
+        // A block with no line-box children cannot be split at a line boundary.
         let breaker = PageBreaker::new(
             Length::from_pt(595.0),
             Length::from_pt(842.0),
@@ -578,8 +829,6 @@ mod tests {
         );
 
         let mut tree = AreaTree::new();
-
-        // Create a large block
         let large_block = Area::new(
             AreaType::Block,
             Rect::from_point_size(
@@ -589,12 +838,159 @@ mod tests {
         );
         let block_id = tree.add_area(large_block);
 
-        // Split with 300pt available
         let continuation = breaker
-            .split_area(&mut tree, block_id, Length::from_pt(300.0))
+            .split_area(&mut tree, block_id, Length::from_pt(300.0), false)
             .expect("test: should succeed");
+        assert!(
+            continuation.is_none(),
+            "a childless block has no line boundary to split at"
+        );
+    }
 
-        assert!(continuation.is_some());
+    #[test]
+    fn test_split_area_honours_orphans_and_widows() {
+        // 10 lines of 12pt = 120pt tall; 50pt available => 4 lines fit.
+        // widows = orphans = 2, so head = min(fit=4, n-widows=8) = 4 (>= 2),
+        // tail = 6 (>= 2): split at index 4.
+        let breaker = PageBreaker::new(
+            Length::from_pt(595.0),
+            Length::from_pt(842.0),
+            [Length::from_pt(72.0); 4],
+        );
+        let mut tree = AreaTree::new();
+        let line_h = Length::from_pt(12.0);
+        let block_id = make_lined_block(&mut tree, 10, line_h, Length::from_pt(400.0));
+
+        let cont = breaker
+            .split_area(&mut tree, block_id, Length::from_pt(50.0), false)
+            .expect("test: should succeed")
+            .expect("test: block must split");
+
+        // Head keeps 4 lines; tail (continuation) keeps 6.
+        assert_eq!(tree.children(block_id).len(), 4, "head line count");
+        assert_eq!(tree.children(cont).len(), 6, "tail line count");
+
+        // Head block height shrinks to 4 * 12 = 48pt; continuation = 6 * 12.
+        assert_eq!(
+            tree.get(block_id).expect("test: head").area.height(),
+            Length::from_pt(48.0)
+        );
+        assert_eq!(
+            tree.get(cont).expect("test: tail").area.height(),
+            Length::from_pt(72.0)
+        );
+
+        // First tail line is re-offset to y = 0 within the continuation.
+        let first_tail = tree.children(cont)[0];
+        assert_eq!(
+            tree.get(first_tail).expect("test: line").area.geometry.y,
+            Length::ZERO
+        );
+    }
+
+    #[test]
+    fn test_split_area_refused_when_fewer_than_widows_plus_orphans() {
+        // 3 lines, widows = orphans = 2 => widows + orphans = 4 > 3, so no legal
+        // split point exists; the block must move whole (None).
+        let breaker = PageBreaker::new(
+            Length::from_pt(595.0),
+            Length::from_pt(842.0),
+            [Length::from_pt(72.0); 4],
+        );
+        let mut tree = AreaTree::new();
+        let line_h = Length::from_pt(12.0);
+        // Force overflow: only 12pt available (1 line fits) but 3 lines tall.
+        let block_id = make_lined_block(&mut tree, 3, line_h, Length::from_pt(400.0));
+
+        let cont = breaker
+            .split_area(&mut tree, block_id, Length::from_pt(12.0), false)
+            .expect("test: should succeed");
+        assert!(
+            cont.is_none(),
+            "block with fewer than widows+orphans lines must not split"
+        );
+        // Block is untouched: still 3 lines.
+        assert_eq!(tree.children(block_id).len(), 3);
+    }
+
+    #[test]
+    fn test_split_area_taller_than_empty_page_splits() {
+        // A block taller than the full body must split on an empty page rather
+        // than clip.  60 lines of 12pt = 720pt; body content height = 698pt =>
+        // 58 lines fit. widow cap = 60 - 2 = 58, so head = 58, tail = 2.
+        let breaker = PageBreaker::new(
+            Length::from_pt(595.0),
+            Length::from_pt(842.0),
+            [Length::from_pt(72.0); 4],
+        );
+        let mut tree = AreaTree::new();
+        let line_h = Length::from_pt(12.0);
+        let block_id = make_lined_block(&mut tree, 60, line_h, Length::from_pt(400.0));
+        let avail = breaker.content_height(); // 698pt, full empty body
+
+        let cont = breaker
+            .split_area(&mut tree, block_id, avail, true)
+            .expect("test: should succeed")
+            .expect("test: tall block must split on empty page");
+
+        assert_eq!(tree.children(block_id).len(), 58, "head fits 58 lines");
+        assert_eq!(tree.children(cont).len(), 2, "tail carries the remainder");
+    }
+
+    #[test]
+    fn test_split_area_keep_together_not_split() {
+        use crate::layout::{Keep, KeepConstraint};
+
+        let breaker = PageBreaker::new(
+            Length::from_pt(595.0),
+            Length::from_pt(842.0),
+            [Length::from_pt(72.0); 4],
+        );
+        let mut tree = AreaTree::new();
+        let line_h = Length::from_pt(12.0);
+        let block_id = make_lined_block(&mut tree, 10, line_h, Length::from_pt(400.0));
+
+        // Apply keep-together="always".
+        let mut constraint = KeepConstraint::new();
+        constraint.keep_together = Keep::Always;
+        tree.get_mut(block_id)
+            .expect("test: block")
+            .area
+            .keep_constraint = Some(constraint);
+
+        let cont = breaker
+            .split_area(&mut tree, block_id, Length::from_pt(50.0), false)
+            .expect("test: should succeed");
+        assert!(
+            cont.is_none(),
+            "keep-together block must never be split (moves whole)"
+        );
+        assert_eq!(tree.children(block_id).len(), 10);
+    }
+
+    #[test]
+    fn test_widow_orphan_split_index_unit() {
+        // 10 lines, 4 fit, widows=orphans=2 -> head 4.
+        let bottoms: Vec<Length> = (1..=10).map(|i| Length::from_pt(12.0 * i as f64)).collect();
+        assert_eq!(
+            PageBreaker::widow_orphan_split_index(&bottoms, Length::from_pt(50.0), 2, 2, false),
+            Some(4)
+        );
+        // Widows force the head below the fit count: 9 fit, widows=3 -> head 7.
+        assert_eq!(
+            PageBreaker::widow_orphan_split_index(&bottoms, Length::from_pt(115.0), 3, 2, false),
+            Some(7)
+        );
+        // Only 1 line fits but orphans=2: no legal split, defer whole.
+        assert_eq!(
+            PageBreaker::widow_orphan_split_index(&bottoms, Length::from_pt(12.0), 2, 2, false),
+            None
+        );
+        // Empty page relaxes the orphan floor: 1 line fits -> head 1.
+        assert_eq!(
+            PageBreaker::widow_orphan_split_index(&bottoms, Length::from_pt(12.0), 2, 2, true),
+            Some(1)
+        );
     }
 
     #[test]
@@ -804,18 +1200,34 @@ mod extended_tests {
     fn test_split_area_fits_returns_none() {
         let breaker = make_breaker();
         let mut tree = AreaTree::new();
-        let area = Area::new(
+        // A block whose total height already fits never splits, regardless of
+        // its line children.
+        let block = Area::new(
             AreaType::Block,
             Rect::from_point_size(
                 Point::ZERO,
                 Size::new(Length::from_pt(400.0), Length::from_pt(100.0)),
             ),
         );
-        let area_id = tree.add_area(area);
+        let block_id = tree.add_area(block);
+        for i in 0..5 {
+            let line = Area::new(
+                AreaType::Line,
+                Rect::new(
+                    Length::ZERO,
+                    Length::from_pt(20.0 * i as f64),
+                    Length::from_pt(400.0),
+                    Length::from_pt(20.0),
+                ),
+            );
+            let line_id = tree.add_area(line);
+            tree.append_child(block_id, line_id)
+                .expect("test: append line");
+        }
 
         // 100pt fits in 200pt available => no split needed
         let result = breaker
-            .split_area(&mut tree, area_id, Length::from_pt(200.0))
+            .split_area(&mut tree, block_id, Length::from_pt(200.0), false)
             .expect("test: should succeed");
         assert!(result.is_none());
     }
@@ -824,25 +1236,42 @@ mod extended_tests {
     fn test_split_area_overflow_creates_continuation() {
         let breaker = make_breaker();
         let mut tree = AreaTree::new();
-        let area = Area::new(
+        // 15 lines of 20pt = 300pt; 200pt available => 10 fit, widow cap 13,
+        // head = 10, tail = 5.  Continuation carries the remaining 5 lines.
+        let block = Area::new(
             AreaType::Block,
             Rect::from_point_size(
                 Point::ZERO,
                 Size::new(Length::from_pt(400.0), Length::from_pt(300.0)),
             ),
         );
-        let area_id = tree.add_area(area);
+        let block_id = tree.add_area(block);
+        for i in 0..15 {
+            let line = Area::new(
+                AreaType::Line,
+                Rect::new(
+                    Length::ZERO,
+                    Length::from_pt(20.0 * i as f64),
+                    Length::from_pt(400.0),
+                    Length::from_pt(20.0),
+                ),
+            );
+            let line_id = tree.add_area(line);
+            tree.append_child(block_id, line_id)
+                .expect("test: append line");
+        }
 
-        // 300pt does not fit in 200pt available => split needed
         let continuation = breaker
-            .split_area(&mut tree, area_id, Length::from_pt(200.0))
+            .split_area(&mut tree, block_id, Length::from_pt(200.0), false)
             .expect("test: should succeed");
         assert!(continuation.is_some());
 
         let cont_id = continuation.expect("test: should succeed");
         let cont_node = tree.get(cont_id).expect("test: should succeed");
-        // Continuation should have the remaining 100pt
+        // Continuation should have the remaining 5 lines => 100pt.
         assert_eq!(cont_node.area.height(), Length::from_pt(100.0));
+        assert_eq!(tree.children(cont_id).len(), 5);
+        assert_eq!(tree.children(block_id).len(), 10);
     }
 
     #[test]

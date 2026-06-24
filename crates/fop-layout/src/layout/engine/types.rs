@@ -312,52 +312,61 @@ impl FloatManager {
     }
 }
 
-/// Page context for tracking page position within a sequence
+/// Page context for tracking page position within a sequence.
+///
+/// Drives conditional page-master selection
+/// (`fo:conditional-page-master-reference`).  The `page_number` here is the
+/// **absolute** page number carried by the page-number resolver (it is what
+/// `odd`/`even` are defined against in XSL-FO §6.4.6), while `is_first` is the
+/// *sequence-relative* first-page flag (page index 0 within the
+/// page-sequence).  `is_last` is only meaningful once the total page count of
+/// the sequence is known (after PASS 1 of pagination); during the forward pass
+/// it is `false` and `last`-conditions are deferred to a post-pass fix-up.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(super) struct PageContext {
-    /// Current page number within the sequence (1-based)
+    /// Absolute page number (1-based) carried by the page-number resolver.
     pub(super) page_number: usize,
-    /// Total number of pages in the sequence (if known)
-    pub(super) total_pages: Option<usize>,
-    /// Whether this is the first page
+    /// Whether this is the first page of the sequence
     pub(super) is_first: bool,
-    /// Whether this is the last page (only known if total_pages is known)
+    /// Whether this is the last page (only known once the sequence's total page
+    /// count is established, after the forward pagination pass).
     pub(super) is_last: bool,
 }
 
 impl PageContext {
-    /// Create a new page context for the first page
-    #[allow(dead_code)]
-    pub(super) fn new() -> Self {
+    /// Build a page context for a page being constructed during the forward
+    /// pagination pass.
+    ///
+    /// * `page_number` — the absolute page number (resolver value) used for
+    ///   `odd`/`even` parity.
+    /// * `is_first` — whether this is the first page of the page-sequence.
+    /// * `is_last` — whether this is known to be the last page.  During the
+    ///   forward pass this is `false`; it is set true only when re-resolving the
+    ///   final page after the total count is known.
+    pub(super) fn for_page(page_number: usize, is_first: bool, is_last: bool) -> Self {
         Self {
-            page_number: 1,
-            total_pages: None,
-            is_first: true,
-            is_last: false,
+            page_number,
+            is_first,
+            is_last,
         }
     }
 
     /// Check if this is an odd-numbered page
-    #[allow(dead_code)]
     pub(super) fn is_odd_page(&self) -> bool {
         self.page_number % 2 == 1
     }
 
     /// Check if this is an even-numbered page
-    #[allow(dead_code)]
     pub(super) fn is_even_page(&self) -> bool {
         self.page_number.is_multiple_of(2)
     }
 
     /// Check if this is the first page
-    #[allow(dead_code)]
     pub(super) fn is_first_page(&self) -> bool {
         self.is_first
     }
 
     /// Check if this is the last page
-    #[allow(dead_code)]
     pub(super) fn is_last_page(&self) -> bool {
         self.is_last
     }

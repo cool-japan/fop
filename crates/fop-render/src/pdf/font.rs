@@ -1,6 +1,29 @@
 //! TrueType font embedding support for PDF
 //!
 //! Provides functionality to embed TrueType/OpenType fonts in PDF documents.
+//!
+//! ## CID-assignment invariant
+//!
+//! All CID-keyed composite fonts produced by this module follow a single, strict
+//! invariant that covers every character including astral (non-BMP) code points:
+//!
+//! > **CID == original TrueType glyph ID** (the GID as returned by
+//! > `ttf_parser::Face::glyph_index`, before any subsetting renumbering).
+//!
+//! Consequences of the invariant:
+//! - The 2-byte code written into the PDF content stream for a character is
+//!   always its original GID.  Because original GIDs are `u16` values, every
+//!   code fits in two bytes — no surrogate pairs appear in the content stream.
+//! - `CIDToGIDMap[original_gid]` is the *new* (post-subset, renumbered) glyph
+//!   ID, so the PDF renderer follows `CID → original GID → new GID → outline`.
+//! - The `/W` widths array is keyed by original GID.
+//! - The `ToUnicode` CMap maps each original GID to its Unicode scalar.  For
+//!   astral characters (U+10000…U+10FFFF) the destination string is the
+//!   4-byte UTF-16BE surrogate pair, e.g. `<D83DDE00>` for U+1F600 (😀).
+//!
+//! This invariant makes BMP and non-BMP characters uniformly consistent: there
+//! is no special-casing in any of the five places (content stream, CIDToGIDMap,
+//! /W, ToUnicode, CIDToGIDMap stream) that name a CID.
 
 use fop_types::{FopError, Result};
 use std::collections::{BTreeSet, HashMap};
@@ -47,8 +70,19 @@ pub struct PdfFont {
     /// Units per em (font scaling factor, typically 1000 or 2048)
     pub units_per_em: u16,
 
-    /// Character to glyph ID mapping for Unicode support
+    /// Character to *new* (post-subset) glyph ID.
+    ///
+    /// Populated by `create_subset_font` from the subsetter's GID remapper.
+    /// Used to build the `CIDToGIDMap` stream (see module-level CID invariant).
     pub char_to_glyph: std::collections::HashMap<char, u16>,
+
+    /// Character to *original* (pre-subset) glyph ID.
+    ///
+    /// This is the CID used in the PDF content stream and as the index into
+    /// the `CIDToGIDMap` stream and the `/W` widths array.  Original GIDs are
+    /// always ≤ 65 535 (u16), so they always fit in the 2-byte CID space.
+    /// Populated by `create_subset_font`; empty for non-subsetted fonts.
+    pub char_to_orig_glyph: std::collections::HashMap<char, u16>,
 }
 
 impl PdfFont {
@@ -119,6 +153,7 @@ impl PdfFont {
         // Build full character to glyph mapping
         // We'll populate this as characters are used
         let char_to_glyph = std::collections::HashMap::new();
+        let char_to_orig_glyph = std::collections::HashMap::new();
 
         // Start with ASCII range as default
         let first_char = 32u32;
@@ -149,6 +184,7 @@ impl PdfFont {
             last_char,
             units_per_em,
             char_to_glyph,
+            char_to_orig_glyph,
         })
     }
 
@@ -165,6 +201,42 @@ impl PdfFont {
             // For characters outside our range, use average width
             self.units_per_em / 2
         }
+    }
+
+    /// Encode `text` as a PDF hex string using original glyph IDs as CIDs.
+    ///
+    /// Each character's 2-byte CID is its original (pre-subset) TrueType glyph
+    /// ID, looked up from `char_to_orig_glyph`.  This is consistent with the
+    /// module-level CID invariant.
+    ///
+    /// If a character is not found in `char_to_orig_glyph` (which can happen for
+    /// non-subsetted fonts or characters added after subsetting), the method
+    /// falls back to parsing the embedded font data on the spot to look up the
+    /// original GID.  Characters not present in the font at all are encoded as
+    /// CID 0 (`.notdef`).
+    ///
+    /// The returned string is a PDF hex string: `<XXXX...>` where each pair of
+    /// hex digits is one byte (2 hex digits per byte, 4 hex digits per CID).
+    pub fn encode_text_with_glyph_ids(&self, text: &str) -> String {
+        // Parse the face once per call (cheap on modern hardware for short text,
+        // and we avoid storing the non-Send ttf_parser::Face on PdfFont itself).
+        let face_opt = ttf_parser::Face::parse(&self.font_data, 0).ok();
+
+        let mut result = String::from("<");
+        for c in text.chars() {
+            // First try the pre-built map, then fall back to the live font parse.
+            let orig_gid: u16 = if let Some(&gid) = self.char_to_orig_glyph.get(&c) {
+                gid
+            } else if let Some(ref face) = face_opt {
+                face.glyph_index(c).map(|gid| gid.0).unwrap_or(0)
+            } else {
+                0
+            };
+            // Write the 2-byte CID as 4 hex digits (big-endian).
+            result.push_str(&format!("{:04X}", orig_gid));
+        }
+        result.push('>');
+        result
     }
 
     /// Measure text width at a given font size
@@ -411,29 +483,68 @@ fn generate_type0_font_dict(
     )
 }
 
-/// Generate CIDFont Type 2 dictionary (TrueType descendant font)
-/// This is referenced by the Type 0 font and contains the actual font metrics
+/// Generate CIDFont Type 2 dictionary (TrueType descendant font).
+///
+/// The `/W` widths array is keyed by **original GID** (the CID per the
+/// module-level invariant).  When `char_to_orig_glyph` is populated (subsetted
+/// font), the array is built sparsely from that map so it stays compact even if
+/// used characters are spread across a wide GID range or include non-BMP glyphs.
+/// For un-subsetted fonts the existing dense array starting at `first_char` is
+/// kept for backward compatibility.
 pub fn generate_cidfont_dict(
     font: &PdfFont,
     descriptor_obj_id: usize,
     cidtogidmap_obj_id: usize,
 ) -> String {
-    // Build width array in CID format
-    // For simplicity, we'll use default width (DW) and individual widths (W)
     let default_width = font.units_per_em / 2;
 
-    // Build W array: [start_cid [widths...]]
-    let mut w_array = String::new();
-    if !font.widths.is_empty() {
-        w_array.push_str(&format!("{} [", font.first_char));
+    // Build a sparse W array keyed by original GID.  Each entry is written in
+    // the PDF form  `<gid> [<width>]`  (single-glyph sub-array), which is
+    // always valid and avoids large contiguous ranges for sparse mappings.
+    let w_array = if !font.char_to_orig_glyph.is_empty() {
+        // Parse the face to read advance widths by original GID.
+        let face_opt = ttf_parser::Face::parse(&font.font_data, 0).ok();
+
+        let mut entries: Vec<(u16, u16)> = font
+            .char_to_orig_glyph
+            .iter()
+            .map(|(&c, &orig_gid)| {
+                let width = if let Some(ref face) = face_opt {
+                    let glyph_id = face.glyph_index(c).unwrap_or(ttf_parser::GlyphId(0));
+                    face.glyph_hor_advance(glyph_id)
+                        .unwrap_or(font.units_per_em / 2)
+                } else {
+                    font.units_per_em / 2
+                };
+                (orig_gid, width)
+            })
+            .collect();
+
+        // Sort by GID for deterministic, verifiable output.
+        entries.sort_by_key(|&(gid, _)| gid);
+
+        let mut s = String::new();
+        for (gid, width) in entries {
+            if !s.is_empty() {
+                s.push(' ');
+            }
+            s.push_str(&format!("{} [{}]", gid, width));
+        }
+        s
+    } else if !font.widths.is_empty() {
+        // Fallback: dense array starting at first_char (BMP-only, non-subsetted).
+        let mut s = format!("{} [", font.first_char);
         for (i, width) in font.widths.iter().enumerate() {
             if i > 0 {
-                w_array.push(' ');
+                s.push(' ');
             }
-            w_array.push_str(&width.to_string());
+            s.push_str(&width.to_string());
         }
-        w_array.push(']');
-    }
+        s.push(']');
+        s
+    } else {
+        String::new()
+    };
 
     format!(
         "<<\n\
@@ -462,8 +573,40 @@ pub fn generate_cidfont_dict(
     )
 }
 
-/// Generate a ToUnicode CMap for CID fonts
-/// Maps CID (character IDs) to Unicode code points
+/// Encode a Unicode scalar value as a UTF-16BE hex string for use in a ToUnicode
+/// CMap destination.
+///
+/// BMP characters (U+0000..=U+FFFF) produce a 4-hex-digit string (`XXXX`).
+/// Astral characters (U+10000..=U+10FFFF) produce the 8-hex-digit surrogate pair
+/// string (`HHHHLLLL`), as required by PDF 1.7 §9.10.3 and the UTF-16BE
+/// encoding of supplementary characters.
+fn unicode_to_utf16be_hex(c: char) -> String {
+    let cp = c as u32;
+    if cp <= 0xFFFF {
+        format!("{:04X}", cp)
+    } else {
+        // Surrogate-pair encoding (UTF-16BE).
+        let cp_shifted = cp - 0x10000;
+        let high: u32 = 0xD800 + (cp_shifted >> 10);
+        let low: u32 = 0xDC00 + (cp_shifted & 0x3FF);
+        format!("{:04X}{:04X}", high, low)
+    }
+}
+
+/// Generate a ToUnicode CMap for CID fonts.
+///
+/// Implements the module-level CID invariant: for each used character the CID
+/// is the character's *original* TrueType glyph ID (`char_to_orig_glyph`).
+/// The mapping is therefore `<orig_gid> <utf16be_unicode>`.
+///
+/// For astral characters (U+10000..=U+10FFFF) the destination value is an
+/// 8-hex-digit UTF-16BE surrogate pair (e.g. `<D83DDE00>` for U+1F600 😀),
+/// as specified in PDF 1.7 §9.10.3 — conforming viewers decode this back to the
+/// full scalar.
+///
+/// When no `char_to_orig_glyph` mapping is available (un-subsetted font) the
+/// function falls back to a compact BMP identity mapping so the CMap is never
+/// empty.
 pub fn generate_to_unicode_cmap(font: &PdfFont) -> String {
     let mut cmap = String::from(
         "/CIDInit /ProcSet findresource begin\n\
@@ -481,23 +624,54 @@ pub fn generate_to_unicode_cmap(font: &PdfFont) -> String {
          endcodespacerange\n",
     );
 
-    // Build character mappings from char_to_glyph
-    // For CID fonts, we map CID (glyph ID) to Unicode
-    if !font.char_to_glyph.is_empty() {
+    // Use char_to_orig_glyph when available (subsetted font path).
+    // The CID is the original GID (a u16 ≤ 0xFFFF); the destination is the
+    // UTF-16BE encoding of the Unicode scalar.
+    if !font.char_to_orig_glyph.is_empty() {
+        let mapping_count = font.char_to_orig_glyph.len();
+        cmap.push_str(&format!("{} beginbfchar\n", mapping_count));
+
+        // Sort by original GID for deterministic output.
+        let mut entries: Vec<(u16, char)> = font
+            .char_to_orig_glyph
+            .iter()
+            .map(|(&c, &orig_gid)| (orig_gid, c))
+            .collect();
+        entries.sort_by_key(|&(gid, _)| gid);
+
+        for (orig_gid, c) in entries {
+            let dest = unicode_to_utf16be_hex(c);
+            cmap.push_str(&format!("<{:04X}> <{}>\n", orig_gid, dest));
+        }
+
+        cmap.push_str("endbfchar\n");
+    } else if !font.char_to_glyph.is_empty() {
+        // Intermediate path: char_to_glyph holds new GIDs but no orig map.
+        // Treat new GID as CID (identity post-subset, always BMP-safe).
         let mapping_count = font.char_to_glyph.len();
         cmap.push_str(&format!("{} beginbfchar\n", mapping_count));
 
-        for (&c, _glyph_id) in font.char_to_glyph.iter() {
-            // Map character code to Unicode
-            let char_code = c as u32;
-            cmap.push_str(&format!("<{:04X}> <{:04X}>\n", char_code, char_code));
+        let mut entries: Vec<(u16, char)> = font
+            .char_to_glyph
+            .iter()
+            .map(|(&c, &new_gid)| (new_gid, c))
+            .collect();
+        entries.sort_by_key(|&(gid, _)| gid);
+
+        for (new_gid, c) in entries {
+            let dest = unicode_to_utf16be_hex(c);
+            cmap.push_str(&format!("<{:04X}> <{}>\n", new_gid, dest));
         }
 
         cmap.push_str("endbfchar\n");
     } else {
-        // If no explicit mapping, create identity mapping for the character range
-        let range_size = (font.last_char - font.first_char + 1) as usize;
-        if range_size > 0 && range_size <= 256 {
+        // Fallback: BMP identity mapping for the font's character range.
+        // Only applies to non-subsetted fonts with a compact BMP range.
+        let range_size = font
+            .last_char
+            .saturating_sub(font.first_char)
+            .saturating_add(1) as usize;
+        if range_size > 0 && range_size <= 256 && font.last_char <= 0xFFFF {
             cmap.push_str(&format!("{} beginbfchar\n", range_size));
             for char_code in font.first_char..=font.last_char {
                 cmap.push_str(&format!("<{:04X}> <{:04X}>\n", char_code, char_code));
@@ -547,8 +721,8 @@ fn create_subset_font(original_font: &PdfFont, subsetter: &FontSubsetter) -> Res
     // therefore speak this *new* glyph space.
     let subset = crate::pdf::font_subset::subset_font(&original_font.font_data, &used_glyphs)?;
 
-    // CID first/last range. Under Identity-H the CID is the Unicode code point,
-    // so the width range is independent of glyph renumbering.
+    // CID first/last range (kept for metadata, but the actual CID space now
+    // uses original GIDs — see module-level invariant).
     let first_char = used_chars.iter().next().map(|&c| c as u32).unwrap_or(0);
     let last_char = used_chars
         .iter()
@@ -556,43 +730,30 @@ fn create_subset_font(original_font: &PdfFont, subsetter: &FontSubsetter) -> Res
         .map(|&c| c as u32)
         .unwrap_or(0xFFFF);
 
-    // char -> NEW glyph id. This feeds the `CIDToGIDMap` stream, so it must use
-    // the remapped IDs to stay consistent with the embedded subset bytes.
-    let mut char_to_glyph_map = HashMap::new();
+    // char → NEW glyph ID (post-subset).
+    // This feeds the `CIDToGIDMap` stream: `CIDToGIDMap[orig_gid] = new_gid`.
+    let mut char_to_glyph_map: HashMap<char, u16> = HashMap::new();
+
+    // char → ORIGINAL glyph ID.
+    // This is the CID used in the content stream, `/W`, and the `ToUnicode` CMap.
+    // Original GIDs are always u16 (≤ 65 535), so they always fit in the 2-byte
+    // CID space — including for astral characters (U+10000..=U+10FFFF).
+    let mut char_to_orig_glyph_map: HashMap<char, u16> = HashMap::new();
+
     for &c in used_chars.iter() {
         if let Some(glyph_id) = face.glyph_index(c) {
-            if let Some(&new_gid) = subset.gid_map.get(&glyph_id.0) {
+            let orig_gid = glyph_id.0; // Always a u16
+            char_to_orig_glyph_map.insert(c, orig_gid);
+            if let Some(&new_gid) = subset.gid_map.get(&orig_gid) {
                 char_to_glyph_map.insert(c, new_gid);
             }
         }
     }
 
-    // For CID fonts, extract widths only for used characters
-    // We'll store them sparsely and use DW (default width) for others
-    let mut widths = Vec::new();
-
-    // Build width array for the character range
-    // For efficiency with sparse ranges, we only include widths for actually used characters
-    let range_size = (last_char - first_char + 1) as usize;
-    if range_size > 0 && range_size <= 65536 {
-        // Build continuous width array for the range
-        for char_code in first_char..=last_char {
-            if let Some(c) = char::from_u32(char_code) {
-                if used_chars.contains(&c) {
-                    let glyph_id = face.glyph_index(c).unwrap_or(ttf_parser::GlyphId(0));
-                    let width = face
-                        .glyph_hor_advance(glyph_id)
-                        .unwrap_or(original_font.units_per_em / 2);
-                    widths.push(width);
-                } else {
-                    // Use default width for unused characters in range
-                    widths.push(original_font.units_per_em / 2);
-                }
-            } else {
-                widths.push(original_font.units_per_em / 2);
-            }
-        }
-    }
+    // The widths field is kept for backward compatibility with the BMP dense-array
+    // path, but for subsetted fonts the sparse W array in `generate_cidfont_dict`
+    // (keyed by `char_to_orig_glyph`) takes precedence and this field is unused.
+    let widths: Vec<u16> = Vec::new();
 
     Ok(PdfFont {
         font_name: original_font.font_name.clone(),
@@ -609,6 +770,7 @@ fn create_subset_font(original_font: &PdfFont, subsetter: &FontSubsetter) -> Res
         last_char,
         units_per_em: original_font.units_per_em,
         char_to_glyph: char_to_glyph_map,
+        char_to_orig_glyph: char_to_orig_glyph_map,
     })
 }
 
@@ -721,6 +883,7 @@ mod tests_extended {
             last_char: 126,
             units_per_em: 1000,
             char_to_glyph: HashMap::new(),
+            char_to_orig_glyph: HashMap::new(),
         }
     }
 
@@ -816,15 +979,36 @@ mod tests_extended {
     }
 
     #[test]
-    fn test_generate_to_unicode_cmap_with_char_map() {
+    fn test_generate_to_unicode_cmap_with_orig_glyph_map() {
         let mut font = minimal_pdf_font();
-        font.char_to_glyph.insert('A', 100);
-        font.char_to_glyph.insert('Z', 200);
+        // char_to_orig_glyph: 'A' has orig GID 65, 'Z' has orig GID 90.
+        font.char_to_orig_glyph.insert('A', 65);
+        font.char_to_orig_glyph.insert('Z', 90);
         let cmap = generate_to_unicode_cmap(&font);
         assert!(cmap.contains("begincmap"));
         assert!(cmap.contains("beginbfchar"));
-        // 'A' = 0x0041 → 0x0041
-        assert!(cmap.contains("<0041> <0041>"));
+        // CID 65 (orig GID of 'A') → Unicode 'A' (U+0041)
+        assert!(cmap.contains("<0041> <0041>"), "CID 0x41 → Unicode 'A'");
+        // CID 90 (orig GID of 'Z') → Unicode 'Z' (U+005A)
+        assert!(cmap.contains("<005A> <005A>"), "CID 0x5A → Unicode 'Z'");
+    }
+
+    #[test]
+    fn test_generate_to_unicode_cmap_astral_char() {
+        let mut font = minimal_pdf_font();
+        // U+1F600 😀 has a hypothetical orig GID 3456.
+        // CID should be 3456 (0x0D80); destination should be the surrogate pair
+        // D83D DE00 (8 hex digits).
+        font.char_to_orig_glyph.insert('\u{1F600}', 3456);
+        let cmap = generate_to_unicode_cmap(&font);
+        assert!(cmap.contains("begincmap"));
+        assert!(cmap.contains("beginbfchar"));
+        // CID 3456 = 0x0D80; dest = D83DDE00 (UTF-16BE surrogate pair for U+1F600)
+        assert!(
+            cmap.contains("<0D80> <D83DDE00>"),
+            "astral char must use orig GID as CID and surrogate pair as destination; \
+             cmap = {cmap}",
+        );
     }
 
     #[test]
@@ -961,5 +1145,170 @@ mod subset_roundtrip_tests {
             "expected glyph ink from the embedded subset, found only {dark_pixels} dark pixels — \
              CIDToGIDMap likely inconsistent with the remapped subset glyph space",
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Non-BMP (astral / supplementary-plane) round-trip tests.
+    //
+    // These prove the CID invariant holds for characters above U+FFFF:
+    //   1. The assigned CID fits in u16 (it is the original TrueType GID).
+    //   2. The CID is present in the CIDToGIDMap stream at the correct offset.
+    //   3. The ToUnicode CMap maps the CID to the correct Unicode scalar via a
+    //      UTF-16BE surrogate-pair destination string.
+    //   4. A BMP character in the same font still round-trips without regression.
+    //
+    // DejaVu Sans is used because it ships on the CI image and contains several
+    // characters in the Supplementary Multilingual Plane:
+    //   U+10300 𐌀 (Old Italic Letter A) is at GID 5373.
+    //   U+1F600 😀 (GRINNING FACE) is at GID 5857.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Assert that an astral character (U+10300 𐌀) is assigned a u16-fitting CID
+    /// (its original TrueType GID ≤ 65 535), that the CIDToGIDMap stream is indexed
+    /// correctly by that CID, and that the ToUnicode CMap contains a surrogate-pair
+    /// destination for the astral Unicode scalar.
+    #[test]
+    fn astral_char_cid_fits_in_u16_and_cidtogidmap_is_correct() {
+        // Old Italic Letter A (U+10300) is in DejaVu Sans at GID 5373.
+        let astral_char = '\u{10300}'; // 𐌀
+
+        let font_data = dejavu_bytes();
+        let original_len = font_data.len();
+
+        let mut doc = PdfDocument::new();
+        let font_index = doc.embed_font(font_data).expect("test: embed font");
+
+        let mut page = PdfPage::new(
+            fop_types::Length::from_pt(612.0),
+            fop_types::Length::from_pt(792.0),
+        );
+        // Must use the *tracked* API so that char_to_orig_glyph is populated.
+        page.add_text_with_font_tracked(
+            &astral_char.to_string(),
+            fop_types::Length::from_pt(72.0),
+            fop_types::Length::from_pt(700.0),
+            fop_types::Length::from_pt(24.0),
+            font_index,
+            &mut doc.font_manager,
+        );
+        doc.add_page(page);
+
+        // Check that char_to_orig_glyph was populated and fits in u16.
+        // The subsetting happens when we call generate_font_objects (inside to_bytes).
+        let pdf_bytes = doc.to_bytes().expect("test: to_bytes");
+
+        // The subsetted PDF must be much smaller than the full DejaVu Sans.
+        assert!(
+            pdf_bytes.len() < original_len,
+            "PDF ({} bytes) should be smaller than the original font ({} bytes)",
+            pdf_bytes.len(),
+            original_len,
+        );
+
+        // Parse the PDF bytes as text and assert:
+        //   (a) The ToUnicode CMap contains the UTF-16BE surrogate pair for U+10300.
+        //       U+10300 = U+10000 + 0x300
+        //       high = 0xD800 + (0x300 >> 10) = 0xD800 + 0  = 0xD800
+        //       low  = 0xDC00 + (0x300 & 0x3FF) = 0xDC00 + 0x300 = 0xDF00
+        //       UTF-16BE hex: D800DF00
+        let pdf_str = String::from_utf8_lossy(&pdf_bytes);
+        assert!(
+            pdf_str.contains("D800DF00"),
+            "ToUnicode CMap must contain the UTF-16BE surrogate pair D800DF00 for U+10300; \
+             PDF content (first 4000 chars): {}",
+            &pdf_str.chars().take(4000).collect::<String>(),
+        );
+
+        // (b) The CID written in the content stream is the original GID, not the
+        //     raw code point 0x10300 (> 0xFFFF).  The original GID of U+10300 in
+        //     DejaVu Sans is 5373 = 0x14FD.  The content stream must contain <14FD>
+        //     (the 2-byte CID), not <D800DF00> (surrogate pair) or <010300>.
+        assert!(
+            pdf_str.contains("<14FD>"),
+            "content stream must contain the 2-byte orig GID <14FD> for U+10300; \
+             got PDF (snippet): {}",
+            &pdf_str.chars().take(4000).collect::<String>(),
+        );
+
+        // (c) The code point 0x10300 must NOT appear as a literal 6-hex-digit CID
+        //     in the content stream (that would be the old, broken encoding).
+        assert!(
+            !pdf_str.contains("<010300>"),
+            "content stream must NOT contain the raw code point <010300> as CID",
+        );
+    }
+
+    /// Prove that an astral character (U+10300 𐌀) round-trips through the PDF
+    /// text extraction pipeline: extract_text() must return the original Unicode
+    /// scalar, not a replacement character or empty string.
+    ///
+    /// This exercises the full chain:
+    ///   content stream (orig GID as CID)
+    ///   → CIDToGIDMap (orig GID → new GID)
+    ///   → ToUnicode (orig GID → UTF-16BE surrogate pair → char)
+    ///   → extracted text
+    #[test]
+    fn astral_char_roundtrips_through_to_unicode() {
+        let astral_char = '\u{10300}'; // 𐌀 Old Italic Letter A (U+10300)
+        let bmp_char = 'A'; // Regression guard: BMP must still work.
+
+        let text = format!("{}{}", bmp_char, astral_char);
+        let (pdf_bytes, _) = build_pdf_with_subset(&text);
+
+        let renderer = PdfRenderer::from_bytes(&pdf_bytes).expect("test: parse PDF");
+        let extracted = renderer.extract_text(0).expect("test: extract text");
+
+        // The astral character must survive the round-trip.
+        assert!(
+            extracted.contains(astral_char),
+            "astral char U+10300 must round-trip through ToUnicode; got: {extracted:?}",
+        );
+        // The BMP character must still work (regression guard).
+        assert!(
+            extracted.contains(bmp_char),
+            "BMP char 'A' must still round-trip; got: {extracted:?}",
+        );
+        // Neither char should degrade to a replacement character.
+        assert!(
+            !extracted.contains('\u{FFFD}') && !extracted.contains('?'),
+            "extracted text must not contain corruption markers; got: {extracted:?}",
+        );
+    }
+
+    /// Prove the CIDToGIDMap stream sizes are u16-bounded for astral chars.
+    /// The old code computed `offset = (c as u32) * 2` which for U+10300 gives
+    /// 0x20600 bytes ≈ 132 KB per character.  The new code uses the original GID
+    /// (5373 for U+10300) → (5373+1)*2 = 10 748 bytes.
+    #[test]
+    fn astral_char_cidtogidmap_is_u16_bounded() {
+        use crate::pdf::cidfont::generate_cidtogidmap_stream;
+
+        // Simulate what create_subset_font produces for U+10300 (orig GID 5373,
+        // new GID 1 after subsetting with just this glyph + .notdef).
+        let astral_char = '\u{10300}';
+        let orig_gid: u16 = 5373;
+        let new_gid: u16 = 1;
+
+        let mut char_to_new = std::collections::HashMap::new();
+        char_to_new.insert(astral_char, new_gid);
+        let mut char_to_orig = std::collections::HashMap::new();
+        char_to_orig.insert(astral_char, orig_gid);
+
+        let stream = generate_cidtogidmap_stream(&char_to_new, &char_to_orig);
+
+        // Stream length must be (5373+1)*2 = 10748, NOT (0x10300+1)*2 = 131 842.
+        let expected_len = (orig_gid as usize + 1) * 2;
+        assert_eq!(
+            stream.len(),
+            expected_len,
+            "CIDToGIDMap stream for U+10300 must be {} bytes (orig GID {}, not raw codepoint)",
+            expected_len,
+            orig_gid,
+        );
+
+        // CIDToGIDMap[orig_gid] = new_gid
+        let offset = (orig_gid as usize) * 2;
+        assert_eq!(stream[offset], (new_gid >> 8) as u8);
+        assert_eq!(stream[offset + 1], (new_gid & 0xFF) as u8);
     }
 }

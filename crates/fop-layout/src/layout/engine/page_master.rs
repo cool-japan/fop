@@ -10,8 +10,72 @@ use super::types::PageContext;
 use super::LayoutEngine;
 
 impl LayoutEngine {
+    /// Resolve a page-sequence `master-reference` to the concrete
+    /// simple-page-master name to use for a single page.
+    ///
+    /// * When `master_reference` names a `fo:simple-page-master` directly, that
+    ///   name is returned unchanged (the common case — behaviour identical to
+    ///   the pre-conditional path).
+    /// * When it names a `fo:page-sequence-master`, its
+    ///   `fo:repeatable-page-master-alternatives` are evaluated against `context`
+    ///   / `is_blank` and the first matching
+    ///   `fo:conditional-page-master-reference` wins.  If no alternative matches
+    ///   (a malformed master with no `any` fallback), the original reference is
+    ///   returned so geometry resolution degrades to the A4 fallback rather than
+    ///   panicking.
+    ///
+    /// Returns the concrete simple-page-master name that
+    /// [`LayoutEngine::extract_page_region_geometry`](crate::layout::engine::LayoutEngine)
+    /// should be asked to resolve.
+    pub(super) fn resolve_page_master_for_page(
+        &self,
+        fo_tree: &FoArena,
+        master_reference: &str,
+        context: &PageContext,
+        is_blank: bool,
+    ) -> String {
+        match self.select_page_master(fo_tree, master_reference, context, is_blank) {
+            Ok(Some(name)) => name,
+            // No `page-sequence-master` matched (either it is a plain
+            // simple-page-master, or no conditional alternative matched): keep
+            // the original reference.  A direct simple-page-master resolves
+            // correctly; an unmatched sequence-master falls through to the
+            // geometry resolver's A4 fallback.
+            Ok(None) | Err(_) => master_reference.to_string(),
+        }
+    }
+
+    /// Whether `master_reference` names a `fo:page-sequence-master` (as opposed
+    /// to a `fo:simple-page-master`).  Used to decide whether per-page
+    /// conditional master selection is needed for a page-sequence at all — when
+    /// it names a simple-page-master the legacy single-geometry path is kept.
+    pub(super) fn is_page_sequence_master(
+        &self,
+        fo_tree: &FoArena,
+        master_reference: &str,
+    ) -> bool {
+        if let Some((root_id, _)) = fo_tree.root() {
+            for child_id in fo_tree.children(root_id) {
+                if let Some(child) = fo_tree.get(child_id) {
+                    if matches!(child.data, FoNodeData::LayoutMasterSet) {
+                        for master_id in fo_tree.children(child_id) {
+                            if let Some(master) = fo_tree.get(master_id) {
+                                if let FoNodeData::PageSequenceMaster { master_name } = &master.data
+                                {
+                                    if master_name == master_reference {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Select the appropriate page master based on page context and conditions
-    #[allow(dead_code)]
     pub(super) fn select_page_master(
         &self,
         fo_tree: &FoArena,
@@ -41,7 +105,6 @@ impl LayoutEngine {
     }
 
     /// Find the page master within the layout-master-set
-    #[allow(dead_code)]
     pub(super) fn find_page_master(
         &self,
         fo_tree: &FoArena,
@@ -94,7 +157,6 @@ impl LayoutEngine {
     }
 
     /// Evaluate conditional page master references and return the first matching one
-    #[allow(dead_code)]
     pub(super) fn evaluate_conditional_masters(
         &self,
         fo_tree: &FoArena,

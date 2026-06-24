@@ -399,17 +399,14 @@ impl PdfDocument {
                 .generate_font_objects(first_embedded_font_obj_id)?;
 
             for (
-                font_idx,
-                (
-                    descriptor_id,
-                    stream_id,
-                    cidfont_id,
-                    type0_dict_id,
-                    to_unicode_id,
-                    cidtogidmap_id,
-                    font,
-                ),
-            ) in font_objects.iter().enumerate()
+                descriptor_id,
+                stream_id,
+                cidfont_id,
+                type0_dict_id,
+                to_unicode_id,
+                cidtogidmap_id,
+                font,
+            ) in font_objects.iter()
             {
                 // Font descriptor object
                 xref_offsets.push(bytes.len());
@@ -452,18 +449,11 @@ impl PdfDocument {
                 bytes.extend_from_slice(cmap_content.as_bytes());
                 bytes.extend_from_slice(b"\nendstream\nendobj\n");
 
-                // CIDToGIDMap stream object
-                // Get the subsetter for this font to find used characters
-                let used_chars = if let Some(subsetter) = self.font_manager.get_subsetter(font_idx)
-                {
-                    subsetter.used_chars()
-                } else {
-                    &std::collections::BTreeSet::new()
-                };
-
+                // CIDToGIDMap stream object.
+                // Per the module-level CID invariant: CID = original GID, value = new GID.
                 let cidtogidmap_data = crate::pdf::cidfont::generate_cidtogidmap_stream(
                     &font.char_to_glyph,
-                    used_chars,
+                    &font.char_to_orig_glyph,
                 );
 
                 xref_offsets.push(bytes.len());
