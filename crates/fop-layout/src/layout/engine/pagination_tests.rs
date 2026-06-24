@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::area::AreaType;
 use fop_core::{FoNode, PropertyList, PropertyValue};
