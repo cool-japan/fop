@@ -3,7 +3,7 @@
 use crate::xml::Namespace;
 use fop_types::{FopError, Location, Result};
 use quick_xml::events::{BytesStart, Event};
-use quick_xml::Reader;
+use quick_xml::{Reader, XmlVersion};
 use std::collections::HashMap;
 use std::io::BufRead;
 
@@ -240,11 +240,15 @@ impl<R: BufRead> XmlParser<R> {
                 Err(_) => continue,
             };
             if key == "xmlns" {
-                if let Ok(uri) = attr.decode_and_unescape_value(self.reader.decoder()) {
+                if let Ok(uri) =
+                    attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, self.reader.decoder())
+                {
                     scope.decls.push((String::new(), uri.into_owned()));
                 }
             } else if let Some(suffix) = key.strip_prefix("xmlns:") {
-                if let Ok(uri) = attr.decode_and_unescape_value(self.reader.decoder()) {
+                if let Ok(uri) =
+                    attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, self.reader.decoder())
+                {
                     scope.decls.push((suffix.to_string(), uri.into_owned()));
                 }
             }
@@ -361,9 +365,9 @@ impl<R: BufRead> XmlParser<R> {
                 continue;
             }
 
-            // quick-xml already handles entity unescaping in decode_and_unescape_value
+            // quick-xml already handles entity unescaping in decoded_and_normalized_value
             let value = attr
-                .decode_and_unescape_value(self.reader.decoder())
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, self.reader.decoder())
                 .map_err(|e| FopError::XmlErrorWithLocation {
                     message: format!("Attribute value decode error: {}", e),
                     location,
