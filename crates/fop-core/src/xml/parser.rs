@@ -240,14 +240,14 @@ impl<R: BufRead> XmlParser<R> {
                 Err(_) => continue,
             };
             if key == "xmlns" {
-                if let Ok(uri) =
-                    attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, self.reader.decoder())
+                if let Ok(uri) = attr
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, self.reader.decoder())
                 {
                     scope.decls.push((String::new(), uri.into_owned()));
                 }
             } else if let Some(suffix) = key.strip_prefix("xmlns:") {
-                if let Ok(uri) =
-                    attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, self.reader.decoder())
+                if let Ok(uri) = attr
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, self.reader.decoder())
                 {
                     scope.decls.push((suffix.to_string(), uri.into_owned()));
                 }
