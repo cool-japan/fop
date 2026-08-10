@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The 14 standard PDF fonts now carry distinct bold/italic AFM metrics; previously bold/italic variants reused the regular widths (wrong text measurement).
 - Property inheritance now covers the full set of ~60 XSL-FO 1.1 inheritable properties; previously only 14 were inherited.
+- The `quick-xml` dependency is now sourced via `oxixml-quickxml-compat` (a drop-in compatibility shim over the Pure-Rust `oxixml-xml` crate); no API or behavior change.
 
 ### Security
 
