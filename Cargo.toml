@@ -69,7 +69,7 @@ fop-cli = { path = "crates/fop-cli", version = "0.1.2" }
 # External dependencies
 thiserror = "2.0"
 log = "0.4"
-quick-xml = { package = "oxixml-quickxml-compat", version = "0.1.1", features = ["serialize"] }
+quick-xml = { package = "oxixml-quickxml-compat", version = "0.1.2", features = ["serialize"] }
 criterion = "0.8"
 png = "0.18"
 jpeg-decoder = "0.3"
