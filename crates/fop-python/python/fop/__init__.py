@@ -1,4 +1,4 @@
-# Copyright (c) COOLJAPAN OU (Team Kitasan)
+# Copyright (c) COOLJAPAN OU (Team KitaSan)
 # SPDX-License-Identifier: Apache-2.0
 #
 # Python package for fop - XSL-FO to PDF/SVG/Text converter.

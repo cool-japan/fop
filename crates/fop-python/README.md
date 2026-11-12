@@ -423,7 +423,7 @@ The underlying rendering engine supports the following XSL-FO 1.1 elements:
 
 ## License
 
-Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team KitaSan)
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 

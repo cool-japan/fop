@@ -165,6 +165,6 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](../../LICENSE) for
 
 ## Author
 
-Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team KitaSan)
 
 Repository: <https://github.com/cool-japan/fop>

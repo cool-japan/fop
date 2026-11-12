@@ -1,4 +1,4 @@
-# Copyright (c) COOLJAPAN OU (Team Kitasan)
+# Copyright (c) COOLJAPAN OU (Team KitaSan)
 # SPDX-License-Identifier: Apache-2.0
 #
 # Type stubs for the fop native extension module.

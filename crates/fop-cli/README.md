@@ -444,7 +444,7 @@ cargo clippy --package fop-cli -- -D warnings
 
 Apache License 2.0
 
-Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team KitaSan)
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

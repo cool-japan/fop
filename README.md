@@ -428,7 +428,7 @@ See [benches/README.md](benches/README.md) for benchmark details.
 
 ## Sponsorship
 
-FOP is developed and maintained by **COOLJAPAN OU (Team Kitasan)**.
+FOP is developed and maintained by **COOLJAPAN OU (Team KitaSan)**.
 
 If you find FOP useful, please consider sponsoring the project to support continued development of the Pure Rust ecosystem.
 
@@ -445,4 +445,4 @@ Your sponsorship helps us:
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
 
-Copyright 2024–2026 COOLJAPAN OU (Team Kitasan)
+Copyright 2024–2026 COOLJAPAN OU (Team KitaSan)

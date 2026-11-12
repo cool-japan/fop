@@ -293,7 +293,7 @@ All dependencies are pure Rust with no C or Fortran build dependencies.
 
 ## License
 
-Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team KitaSan)
 
 Licensed under the [Apache License, Version 2.0](https://github.com/cool-japan/fop/blob/main/LICENSE).
 

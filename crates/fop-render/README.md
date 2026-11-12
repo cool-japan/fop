@@ -298,6 +298,6 @@ Apache-2.0
 
 ## Author
 
-COOLJAPAN OU (Team Kitasan)
+COOLJAPAN OU (Team KitaSan)
 
 Copyright 2024-2026 COOLJAPAN OU

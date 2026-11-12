@@ -423,7 +423,7 @@ Because `FoArena` carries a lifetime parameter for property inheritance, the ent
 
 ## Author
 
-COOLJAPAN OU (Team Kitasan)
+COOLJAPAN OU (Team KitaSan)
 
 ## Repository
 
@@ -431,7 +431,7 @@ COOLJAPAN OU (Team Kitasan)
 
 ## License
 
-Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
+Copyright 2024-2026 COOLJAPAN OU (Team KitaSan)
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](https://github.com/cool-japan/fop/blob/main/LICENSE) for details.
 
